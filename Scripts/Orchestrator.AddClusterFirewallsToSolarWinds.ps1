@@ -13,10 +13,13 @@
 # Please update the connection details/credentials for both systems below.
 
 # Dot-source the Check Point functions (Connect-SmartConsole,
-# Get-SmartConsoleClusterFirewallAddresses, Disconnect-SmartConsole).
-# The example-usage block at the bottom of that file only runs when commented
-# lines are uncommented, so dot-sourcing it here just loads the functions.
+# Get-SmartConsoleClusterFirewallAddresses, Disconnect-SmartConsole) and the
+# SolarWinds node-creation helper (Add-SwisNodeWithDefaultPollers). The
+# example-usage blocks at the bottom of those files only run when their
+# commented lines are uncommented, so dot-sourcing here just loads the
+# functions.
 . (Join-Path $PSScriptRoot "CheckPoint.GetClusterFirewallAddresses.ps1")
+. (Join-Path $PSScriptRoot "CRUD.AddNodeWithPollers.ps1")
 
 # --- Check Point SmartConsole connection ---
 $cpServer   = "smartcenter.example.com"
@@ -52,38 +55,5 @@ foreach ($fw in $firewalls) {
     }
 
     Write-Host "Adding node '$($fw.MemberName)' ($($fw.MemberIp)) from cluster '$($fw.ClusterName)'..."
-
-    $newNodeProps = @{
-        IPAddress = $fw.MemberIp;
-        EngineID = 1;
-        Caption = $fw.MemberName;
-
-        # SNMP v2 specific
-        ObjectSubType = "SNMP";
-        SNMPVersion = 2;
-
-        DNS = "";
-        SysName = "";
-    }
-
-    $newNodeUri = New-SwisObject $swis -EntityType "Orion.Nodes" -Properties $newNodeProps
-    $nodeProps = Get-SwisObject $swis -Uri $newNodeUri
-
-    $poller = @{
-        NetObject="N:"+$nodeProps["NodeID"];
-        NetObjectType="N";
-        NetObjectID=$nodeProps["NodeID"];
-    }
-
-    $poller["PollerType"]="N.Status.ICMP.Native";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
-
-    $poller["PollerType"]="N.ResponseTime.ICMP.Native";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
-
-    $poller["PollerType"]="N.Details.SNMP.Generic";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
-
-    $poller["PollerType"]="N.Uptime.SNMP.Generic";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
+    Add-SwisNodeWithDefaultPollers -Swis $swis -Name $fw.MemberName -IPAddress $fw.MemberIp | Out-Null
 }

@@ -19,6 +19,9 @@ param(
     [string]$IpColumn = "MemberIp"
 )
 
+# Dot-source the shared node-creation helper (Add-SwisNodeWithDefaultPollers).
+. (Join-Path $PSScriptRoot "CRUD.AddNodeWithPollers.ps1")
+
 # Connect to SWIS
 $hostname = "localhost"
 $username = "admin"
@@ -38,40 +41,5 @@ foreach ($row in $rows) {
     }
 
     Write-Host "Adding node '$name' ($ip)..."
-
-    # add a node
-    $newNodeProps = @{
-        IPAddress = $ip;
-        EngineID = 1;
-        Caption = $name;
-
-        # SNMP v2 specific
-        ObjectSubType = "SNMP";
-        SNMPVersion = 2;
-
-        DNS = "";
-        SysName = "";
-    }
-
-    $newNodeUri = New-SwisObject $swis -EntityType "Orion.Nodes" -Properties $newNodeProps
-    $nodeProps = Get-SwisObject $swis -Uri $newNodeUri
-
-    # register default pollers for the node
-    $poller = @{
-        NetObject="N:"+$nodeProps["NodeID"];
-        NetObjectType="N";
-        NetObjectID=$nodeProps["NodeID"];
-    }
-
-    $poller["PollerType"]="N.Status.ICMP.Native";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
-
-    $poller["PollerType"]="N.ResponseTime.ICMP.Native";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
-
-    $poller["PollerType"]="N.Details.SNMP.Generic";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
-
-    $poller["PollerType"]="N.Uptime.SNMP.Generic";
-    New-SwisObject $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
+    Add-SwisNodeWithDefaultPollers -Swis $swis -Name $name -IPAddress $ip | Out-Null
 }
