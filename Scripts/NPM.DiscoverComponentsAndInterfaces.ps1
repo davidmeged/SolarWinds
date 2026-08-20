@@ -13,8 +13,24 @@
 # adds every one of them that does not already exist, and then discovers
 # and adds their interfaces for monitoring.
 #
-# Please update the hostname/credential setup and the $components list
-# below to match your environment before running.
+# Please update the hostname/credential setup below to match your
+# environment before running.
+#
+# The list of components (nodes) can be supplied via the -IPAddresses
+# parameter, e.g.:
+#   .\NPM.DiscoverComponentsAndInterfaces.ps1 -IPAddresses "10.0.0.1","10.0.0.2","10.0.0.3"
+#   .\NPM.DiscoverComponentsAndInterfaces.ps1 -IPAddresses "10.0.0.1,10.0.0.2,10.0.0.3"
+# If -IPAddresses is not supplied, the sample list below is used instead.
+
+param(
+    # One or more IP addresses to add/discover. Accepts either an array of
+    # strings or a single comma-separated string.
+    [string[]]$IPAddresses,
+
+    # Shared settings applied to every IP address passed via -IPAddresses.
+    [int]$EngineID = 1,
+    [int]$SNMPVersion = 2
+)
 
 # Connect to SWIS
 $hostname = "localhost"
@@ -24,12 +40,25 @@ $cred = New-Object -typename System.Management.Automation.PSCredential -argument
 $swis = Connect-Swis -host $hostname -cred $cred
 
 # The list of components (nodes) to add and discover interfaces on.
-# Add as many entries as needed.
-$components = @(
-    @{ IPAddress = "10.0.0.1"; EngineID = 1; SNMPVersion = 2; DNS = ""; SysName = "" },
-    @{ IPAddress = "10.0.0.2"; EngineID = 1; SNMPVersion = 2; DNS = ""; SysName = "" },
-    @{ IPAddress = "10.0.0.3"; EngineID = 1; SNMPVersion = 2; DNS = ""; SysName = "" }
-)
+if ($IPAddresses)
+{
+    # Build $components from the -IPAddresses parameter (supports both
+    # "-IPAddresses ip1,ip2" and "-IPAddresses 'ip1,ip2'" invocation styles).
+    $components = $IPAddresses `
+        | ForEach-Object { $_.Split(',') } `
+        | ForEach-Object { $_.Trim() } `
+        | Where-Object { $_ } `
+        | ForEach-Object { @{ IPAddress = $_; EngineID = $EngineID; SNMPVersion = $SNMPVersion; DNS = ""; SysName = "" } }
+}
+else
+{
+    # Fallback sample list. Add as many entries as needed.
+    $components = @(
+        @{ IPAddress = "10.0.0.1"; EngineID = 1; SNMPVersion = 2; DNS = ""; SysName = "" },
+        @{ IPAddress = "10.0.0.2"; EngineID = 1; SNMPVersion = 2; DNS = ""; SysName = "" },
+        @{ IPAddress = "10.0.0.3"; EngineID = 1; SNMPVersion = 2; DNS = ""; SysName = "" }
+    )
+}
 
 function Add-Component
 {
