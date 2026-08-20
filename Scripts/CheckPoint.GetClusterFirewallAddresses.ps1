@@ -143,6 +143,12 @@ function Get-SmartConsoleClusterFirewallAddresses {
 # try {
 #     $firewalls = Get-SmartConsoleClusterFirewallAddresses -Session $session
 #     $firewalls | Format-Table -AutoSize
+#
+#     # Hand off the discovered addresses to the SolarWinds side (see
+#     # CRUD.AddNodesFromCsv.ps1) via a plain CSV file - keeps the two
+#     # automations decoupled so each can be run, tested, and reviewed on its
+#     # own schedule.
+#     $firewalls | Export-Csv -Path ".\ClusterFirewalls.csv" -NoTypeInformation
 # }
 # finally {
 #     Disconnect-SmartConsole -Session $session
