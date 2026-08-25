@@ -2,22 +2,35 @@
     Redact-FileContent.ps1
 
     Unified replacement/redaction engine for files, recursively through subfolders.
-    Combines two modes that share the same file-processing, dry-run and backup logic:
+    All modes below share the same file-processing, dry-run and backup logic.
 
       1. Literal/regex replacements ($Replacements below) - always applied.
          Each key is a regex pattern, each value is what to replace it with.
          (Companion to Search-FilesForWord.ps1 - use that one first to preview matches.)
 
-      2. Switch/device name anonymization (-Anonymize) - optional, applied in the
-         same pass. Finds whitespace-delimited tokens that start with "S"/"s" and end
-         with "nn" (letters, digits, and special characters allowed in between, e.g.
-         S-DC1-01nn) and replaces each one with a sequential generic placeholder
-         (SWITCH001, SWITCH002, ...). The same original name always maps to the same
-         placeholder within a single run, but the mapping is NOT persisted between
-         runs - running the script again assigns fresh numbers.
+      2. -AnonymizeSwitchNames - finds whitespace-delimited tokens that start with
+         "S"/"s" and end with "nn" (letters, digits, and special characters allowed
+         in between, e.g. S-DC1-01nn) and replaces each with a sequential generic
+         placeholder (SWITCH001, SWITCH002, ...).
 
-    Both modes support -DryRun (report what would change, touch nothing) and -Backup
-    (copy each modified file's original content aside before overwriting it).
+      3. -AnonymizeUsernames - finds tokens like "user22351" (literal "user" followed
+         directly by digits) and replaces each with a sequential placeholder
+         (USER001, USER002, ...).
+
+      4. -AnonymizeIPs - finds IPv4 addresses and replaces each with a sequential
+         placeholder (IP001, IP002, ...).
+
+      5. -StripPortDescriptions - removes the description text from interface lines
+         such as "GigabitEthernet1/0/1 - TO_SWITCH001", leaving just the port name
+         ("GigabitEthernet1/0/1"). Covers GigabitEthernet, TenGigabitEthernet,
+         TwentyFiveGigabitEthernet, FastEthernet and Ethernet ports.
+
+    For modes 2-4, the same original value always maps to the same placeholder
+    within a single run (each category has its own counter), but nothing is
+    persisted between runs - running the script again assigns fresh numbers.
+
+    All write modes support -DryRun (report what would change, touch nothing) and
+    -Backup (copy each modified file's original content aside before overwriting it).
 
     USAGE EXAMPLES:
 
@@ -27,14 +40,14 @@
         # Apply literal replacements for real, keeping backups
         .\Redact-FileContent.ps1 -Path "D:\" -Backup
 
-        # Also anonymize switch names in the same pass
-        .\Redact-FileContent.ps1 -Path "D:\" -Anonymize -Backup
+        # Anonymize switch names, usernames and IPs, and strip port descriptions
+        .\Redact-FileContent.ps1 -Path "D:\" -AnonymizeSwitchNames -AnonymizeUsernames -AnonymizeIPs -StripPortDescriptions -Backup
 
-        # Anonymize only - skip the literal $Replacements table
-        .\Redact-FileContent.ps1 -Path "D:\" -Anonymize -Replacements @{} -DryRun
+        # Anonymization only - skip the literal $Replacements table
+        .\Redact-FileContent.ps1 -Path "D:\" -AnonymizeIPs -Replacements @{} -DryRun
 
         # Limit to specific file types
-        .\Redact-FileContent.ps1 -Path "D:\Logs" -Include *.log,*.txt -Anonymize -DryRun
+        .\Redact-FileContent.ps1 -Path "D:\Logs" -Include *.log,*.txt -AnonymizeUsernames -DryRun
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -51,14 +64,25 @@ param(
         "ass" = "aaa"
     },
 
-    # Also anonymize switch/device name tokens matching -AnonymizePattern.
-    [switch]$Anonymize,
+    # Anonymize switch/device name tokens matching -SwitchNamePattern.
+    [switch]$AnonymizeSwitchNames,
+    [string]$SwitchNamePattern = '(?<!\S)[Ss][^\s]*nn(?!\S)',
+    [string]$SwitchNamePrefix = "SWITCH",
 
-    # Regex matching one switch/device name token (used only with -Anonymize).
-    [string]$AnonymizePattern = '(?<!\S)[Ss][^\s]*nn(?!\S)',
+    # Anonymize username tokens matching -UsernamePattern.
+    [switch]$AnonymizeUsernames,
+    [string]$UsernamePattern = '(?<!\S)user\d+(?!\S)',
+    [string]$UsernamePrefix = "USER",
 
-    # Prefix used for the generic anonymized names (SWITCH001, SWITCH002, ...).
-    [string]$AnonymizeNamePrefix = "SWITCH",
+    # Anonymize IPv4 addresses.
+    [switch]$AnonymizeIPs,
+    [string]$IPPattern = '(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?!\d)',
+    [string]$IPPrefix = "IP",
+
+    # Strip the description text off interface lines, e.g.
+    # "GigabitEthernet1/0/1 - TO_SWITCH001" -> "GigabitEthernet1/0/1".
+    [switch]$StripPortDescriptions,
+    [string]$PortDescriptionPattern = '^(?<port>(?:TwentyFiveGigabitEthernet|TenGigabitEthernet|GigabitEthernet|FastEthernet|Ethernet)\d+(?:/\d+)*)\s*-\s*.*$',
 
     # Report matches and what would change, without modifying any file.
     [switch]$DryRun,
@@ -82,20 +106,36 @@ if ($Backup -and -not $BackupFolder) {
 
 $resolvedRoot = (Resolve-Path -LiteralPath $Path).ProviderPath
 $allFiles = Get-ChildItem -Path $Path -Include $Include -Recurse -File -ErrorAction SilentlyContinue
-$anonymizeRegex = [regex]::new($AnonymizePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 
-# Original switch name (as first encountered) -> generic placeholder. Consistent for this run only.
-$nameMap = [ordered]@{}
-$nextIndex = 1
+$ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+$switchNameRegex = [regex]::new($SwitchNamePattern, $ignoreCase)
+$usernameRegex = [regex]::new($UsernamePattern, $ignoreCase)
+$ipRegex = [regex]::new($IPPattern)
+$portDescriptionRegex = [regex]::new($PortDescriptionPattern, $ignoreCase)
+
+# Original value (as first encountered) -> generic placeholder, one map per category.
+# Consistent for this run only - not persisted between runs.
+$switchNameMap = [ordered]@{}
+$usernameMap = [ordered]@{}
+$ipMap = [ordered]@{}
+$switchNameIndex = 1
+$usernameIndex = 1
+$ipIndex = 1
 
 function Get-PlaceholderName {
-    param([string]$OriginalName)
+    param(
+        [string]$OriginalValue,
+        [System.Collections.Specialized.OrderedDictionary]$Map,
+        [string]$Prefix,
+        [string]$IndexVarName
+    )
 
-    if (-not $nameMap.Contains($OriginalName)) {
-        $nameMap[$OriginalName] = "{0}{1:D3}" -f $AnonymizeNamePrefix, $script:nextIndex
-        $script:nextIndex++
+    if (-not $Map.Contains($OriginalValue)) {
+        $index = Get-Variable -Name $IndexVarName -Scope Script -ValueOnly
+        $Map[$OriginalValue] = "{0}{1:D3}" -f $Prefix, $index
+        Set-Variable -Name $IndexVarName -Scope Script -Value ($index + 1)
     }
-    return $nameMap[$OriginalName]
+    return $Map[$OriginalValue]
 }
 
 $changedCount = 0
@@ -121,11 +161,32 @@ foreach ($fileItem in $allFiles) {
             }
         }
 
-        if ($Anonymize) {
-            $currentRow = $anonymizeRegex.Replace($currentRow, {
+        if ($StripPortDescriptions -and $portDescriptionRegex.IsMatch($currentRow)) {
+            $fileMatchCount++
+            $currentRow = $portDescriptionRegex.Replace($currentRow, '${port}')
+        }
+
+        if ($AnonymizeSwitchNames) {
+            $currentRow = $switchNameRegex.Replace($currentRow, {
                 param($match)
                 $script:fileMatchCount++
-                Get-PlaceholderName -OriginalName $match.Value
+                Get-PlaceholderName -OriginalValue $match.Value -Map $switchNameMap -Prefix $SwitchNamePrefix -IndexVarName "switchNameIndex"
+            })
+        }
+
+        if ($AnonymizeUsernames) {
+            $currentRow = $usernameRegex.Replace($currentRow, {
+                param($match)
+                $script:fileMatchCount++
+                Get-PlaceholderName -OriginalValue $match.Value -Map $usernameMap -Prefix $UsernamePrefix -IndexVarName "usernameIndex"
+            })
+        }
+
+        if ($AnonymizeIPs) {
+            $currentRow = $ipRegex.Replace($currentRow, {
+                param($match)
+                $script:fileMatchCount++
+                Get-PlaceholderName -OriginalValue $match.Value -Map $ipMap -Prefix $IPPrefix -IndexVarName "ipIndex"
             })
         }
 
@@ -171,9 +232,18 @@ if ($DryRun) {
     }
 }
 
-if ($Anonymize -and $nameMap.Count -gt 0) {
-    Write-Host "`nSwitch name mapping for this run:" -ForegroundColor Cyan
-    $nameMap.GetEnumerator() | ForEach-Object {
+function Write-NameMapping {
+    param([string]$Title, [System.Collections.Specialized.OrderedDictionary]$Map)
+
+    if ($Map.Count -eq 0) {
+        return
+    }
+    Write-Host "`n$Title mapping for this run:" -ForegroundColor Cyan
+    $Map.GetEnumerator() | ForEach-Object {
         Write-Host ("  {0}  ->  {1}" -f $_.Key, $_.Value)
     }
 }
+
+if ($AnonymizeSwitchNames) { Write-NameMapping -Title "Switch name" -Map $switchNameMap }
+if ($AnonymizeUsernames) { Write-NameMapping -Title "Username" -Map $usernameMap }
+if ($AnonymizeIPs) { Write-NameMapping -Title "IP address" -Map $ipMap }
