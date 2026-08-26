@@ -8,14 +8,15 @@
          Each key is a regex pattern, each value is what to replace it with.
          (Companion to Search-FilesForWord.ps1 - use that one first to preview matches.)
 
-      2. -AnonymizeSwitchNames - finds whitespace-delimited tokens that start with
-         "S"/"s" and end with "nn" (letters, digits, and special characters allowed
-         in between, e.g. S-DC1-01nn) and replaces each with a sequential generic
-         placeholder (SWITCH001, SWITCH002, ...).
+      2. -AnonymizeSwitchNames - finds "S"/"s" followed by letters/digits/special
+         characters and ending in "nn" (e.g. S-DC1-01nn), anywhere in a line - including
+         glued to a prefix like "Uplink_to_S-DC1-01nn" - and replaces just that part
+         with a sequential generic placeholder (SWITCH001, SWITCH002, ...).
 
-      3. -AnonymizeUsernames - finds tokens like "user22351" (literal "user" followed
-         directly by digits) and replaces each with a sequential placeholder
-         (USER001, USER002, ...).
+      3. -AnonymizeUsernames - finds "user" followed directly by digits (e.g.
+         "user22351"), anywhere in a line - including glued to other text like
+         "PC_user22351" or "user10023_workstation" - and replaces just that part with
+         a sequential placeholder (USER001, USER002, ...).
 
       4. -AnonymizeIPs - finds IPv4 addresses and replaces each with a sequential
          placeholder (IP001, IP002, ...).
@@ -66,12 +67,12 @@ param(
 
     # Anonymize switch/device name tokens matching -SwitchNamePattern.
     [switch]$AnonymizeSwitchNames,
-    [string]$SwitchNamePattern = '(?<!\S)[Ss][^\s]*nn(?!\S)',
+    [string]$SwitchNamePattern = '[Ss][^\s]*nn(?!\S)',
     [string]$SwitchNamePrefix = "SWITCH",
 
     # Anonymize username tokens matching -UsernamePattern.
     [switch]$AnonymizeUsernames,
-    [string]$UsernamePattern = '(?<!\S)user\d+(?!\S)',
+    [string]$UsernamePattern = 'user\d+',
     [string]$UsernamePrefix = "USER",
 
     # Anonymize IPv4 addresses.
@@ -82,7 +83,7 @@ param(
     # Strip the description text off interface lines, e.g.
     # "GigabitEthernet1/0/1 - TO_SWITCH001" -> "GigabitEthernet1/0/1".
     [switch]$StripPortDescriptions,
-    [string]$PortDescriptionPattern = '^(?<port>(?:TwentyFiveGigabitEthernet|TenGigabitEthernet|GigabitEthernet|FastEthernet|Ethernet)\d+(?:/\d+)*)\s*-\s*.*$',
+    [string]$PortDescriptionPattern = '^\s*(?<port>(?:TwentyFiveGigabitEthernet|TenGigabitEthernet|GigabitEthernet|FastEthernet|Ethernet)\d+(?:/\d+)*)\s*-\s*.*$',
 
     # Report matches and what would change, without modifying any file.
     [switch]$DryRun,
