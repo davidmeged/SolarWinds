@@ -21,12 +21,8 @@
     Please update the hostname/credential setup below to match your
     environment before running.
 
-    The list of components (nodes) can be supplied via the -IPAddresses
-    parameter, e.g.:
-        .\NPM.DiscoverComponentsAndInterfaces.ps1 -IPAddresses "10.0.0.1","10.0.0.2","10.0.0.3"
-        .\NPM.DiscoverComponentsAndInterfaces.ps1 -IPAddresses "10.0.0.1,10.0.0.2,10.0.0.3"
-
-    If -IPAddresses is not supplied, the sample list below is used instead.
+    The list of components (nodes) is retrieved automatically from the
+    Check Point SmartConsole API (cluster members and simple gateways).
 #>
 
 param(
@@ -37,7 +33,7 @@ param(
     # Shared settings applied to every IP address passed via -IPAddresses.
     [int]$EngineID = 2,
     [int]$SNMPVersion = 2,
-    [string]$SNMPCommunnity = ''
+    [string]$SNMPCommunity = ''
 )
 
 # --- Connect to SWIS ---
@@ -64,30 +60,40 @@ $body = @{
 } | ConvertTo-Json
 
 #login proccess for get sid <like token>
-$response = Invoke-WebRequest -Uri $url -Headers $header -Body $body -Method Post -SkipCertificateCheck
-$responseJson = $response.Content | ConvertFrom-Json
-$sid = $responseJson.sid
+try {
+    $response = Invoke-WebRequest -Uri $url -Headers $header -Body $body -Method Post -SkipCertificateCheck
+    $responseJson = $response.Content | ConvertFrom-Json
+    $sid = $responseJson.sid
 
-#Url to get gatways under Smart Console
-$urlForCluster = "https:///web_api/show-cluster-members"
-$urlForSimple  = "https:///web_api/show-simple-gateways"
-$header = @{
-    "Content-Type" = "application/json"
-    "x-chkp-sid" = $sid
+    if (-not $sid) {
+        Write-Error "SmartConsole login did not return a session id (sid). Check URL/credentials."
+        exit
+    }
+
+    #Url to get gatways under Smart Console
+    $urlForCluster = "https:///web_api/show-cluster-members"
+    $urlForSimple  = "https:///web_api/show-simple-gateways"
+    $header = @{
+        "Content-Type" = "application/json"
+        "x-chkp-sid" = $sid
+    }
+    $body = @{
+        "limit" = 500
+        "offset" = 0
+        "details-level" = "full"
+    } | ConvertTo-Json
+
+    # Calling with API to Smart Console to get gateways
+    $responseForCluster = Invoke-WebRequest -Uri $urlForCluster -Headers $header -Body $body -Method Post -SkipCertificateCheck
+    $responseJsonForCluster = $responseForCluster.Content | ConvertFrom-Json
+    $addressesForCluster = $responseJsonForCluster.objects.'ip-address'
+    $responseForSimple = Invoke-WebRequest -Uri $urlForSimple -Headers $header -Body $body -Method Post -SkipCertificateCheck
+    $responseJsonForSimple = $responseForSimple.Content | ConvertFrom-Json
+    $addressesForSimple = $responseJsonForSimple.objects.'ipv4-address'
+} catch {
+    Write-Error "Failed to retrieve gateways from SmartConsole: $($_.Exception.Message)"
+    exit
 }
-$body = @{
-    "limit" = 500
-    "offset" = 0
-    "details-level" = "full"
-} | ConvertTo-Json
-
-# Calling with API to Smart Console to get gateways
-$responseForCluster = Invoke-WebRequest -Uri $urlForCluster -Headers $header -Body $body -Method Post -SkipCertificateCheck
-$responseJsonForCluster = $responseForCluster.Content | ConvertFrom-Json
-$addressesForCluster = $responseJsonForCluster.objects.'ip-address'
-$responseForSimple = Invoke-WebRequest -Uri $urlForSimple -Headers $header -Body $body -Method Post -SkipCertificateCheck
-$responseJsonForSimple = $responseForSimple.Content | ConvertFrom-Json
-$addressesForSimple = $responseJsonForSimple.objects.'ipv4-address'
 
 
 try {
@@ -99,13 +105,16 @@ try {
 }
 
 # --- Build the list of components to process ---
-if ($addressesForCluster) {
-    # Build $components from the -IPAddresses parameter (supports both
-    # "-IPAddresses ip1,ip2" and "-IPAddresses 'ip1,ip2'" invocation styles).
-    $components = $addressesForCluster |
+$allAddresses = @($addressesForCluster) + @($addressesForSimple)
+
+if ($allAddresses) {
+    # Supports addresses arriving either as an array of strings or as
+    # single comma-separated strings.
+    $components = $allAddresses |
         ForEach-Object { $_.Split(',') } |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ } |
+        Select-Object -Unique |
         ForEach-Object {
             @{
                 IPAddress   = $_
@@ -113,7 +122,7 @@ if ($addressesForCluster) {
                 SNMPVersion = $SNMPVersion
                 DNS         = ""
                 SysName     = ""
-                Community   = $SNMPCommunnity
+                Community   = $SNMPCommunity
             }
         }
 }
@@ -176,7 +185,7 @@ function Add-DiscoveredInterfaces {
     }
 
     $discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object {
-        $_.Caption.InnerText -match 'bond\d.\d+' -or
+        $_.Caption.InnerText -match 'bond\d+\.\d+' -or
         $_.Caption.InnerText -match '\blo\b' -or
         $_.Caption.InnerText -match '\bpimreg\b' -or
         $_.Caption.InnerText -match 'eth\d+\.\d+' -or
@@ -187,9 +196,12 @@ function Add-DiscoveredInterfaces {
     $interfaceCount = $discovered.DiscoveredInterfaces.DiscoveredLiteInterface.Count
 
     # Add the remaining interfaces
-    Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-
-    Write-Host " Added $interfaceCount interface[s] for node $nodeId." -ForegroundColor Green
+    try {
+        Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
+        Write-Host " Added $interfaceCount interface[s] for node $nodeId." -ForegroundColor Green
+    } catch {
+        Write-Host " Failed to add interfaces for node $nodeId : $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
 # --- Main Loop: Process each component ---
@@ -214,6 +226,17 @@ foreach ($component in $components) {
 
     } catch {
         Write-Host " Failed to process $($component.IPAddress): $($_.Exception.Message)"
+    }
+}
+
+# --- Logout from SmartConsole ---
+if ($sid) {
+    try {
+        $urlForLogout = "https:///web_api/logout"
+        Invoke-WebRequest -Uri $urlForLogout -Headers $header -Body (@{} | ConvertTo-Json) -Method Post -SkipCertificateCheck | Out-Null
+        Write-Host "Logged out from SmartConsole session." -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to logout from SmartConsole session: $($_.Exception.Message)"
     }
 }
 
