@@ -41,6 +41,35 @@ $hostname = ""
 $username = ""
 $password = Import-Clixml -Path ".\Credentials\SolarWindsCredential.xml"
 
+# --- Function: Get all addresses from a SmartConsole endpoint (paginated) ---
+function Get-SmartConsoleAddresses {
+    param(
+        [string]$Url,
+        [string]$Field,
+        [hashtable]$Header
+    )
+
+    $addresses = @()
+    $offset    = 0
+    $pageSize  = 500
+
+    do {
+        $body = @{
+            "limit"         = $pageSize
+            "offset"        = $offset
+            "details-level" = "full"
+        } | ConvertTo-Json
+
+        $response     = Invoke-WebRequest -Uri $Url -Headers $Header -Body $body -Method Post -SkipCertificateCheck
+        $responseJson = $response.Content | ConvertFrom-Json
+
+        $addresses += $responseJson.objects.$Field
+        $offset     += $pageSize
+    } while ($offset -lt $responseJson.total)
+
+    return $addresses
+}
+
 # --- Connect to SmartConsole ---
 #url and server for login to SmartConsole
 $url = "https:///web_api/login"
@@ -77,19 +106,10 @@ try {
         "Content-Type" = "application/json"
         "x-chkp-sid" = $sid
     }
-    $body = @{
-        "limit" = 500
-        "offset" = 0
-        "details-level" = "full"
-    } | ConvertTo-Json
 
-    # Calling with API to Smart Console to get gateways
-    $responseForCluster = Invoke-WebRequest -Uri $urlForCluster -Headers $header -Body $body -Method Post -SkipCertificateCheck
-    $responseJsonForCluster = $responseForCluster.Content | ConvertFrom-Json
-    $addressesForCluster = $responseJsonForCluster.objects.'ip-address'
-    $responseForSimple = Invoke-WebRequest -Uri $urlForSimple -Headers $header -Body $body -Method Post -SkipCertificateCheck
-    $responseJsonForSimple = $responseForSimple.Content | ConvertFrom-Json
-    $addressesForSimple = $responseJsonForSimple.objects.'ipv4-address'
+    # Calling with API to Smart Console to get gateways (handles pagination)
+    $addressesForCluster = Get-SmartConsoleAddresses -Url $urlForCluster -Field 'ip-address'   -Header $header
+    $addressesForSimple  = Get-SmartConsoleAddresses -Url $urlForSimple  -Field 'ipv4-address' -Header $header
 } catch {
     Write-Error "Failed to retrieve gateways from SmartConsole: $($_.Exception.Message)"
     exit
