@@ -7,7 +7,9 @@ function Add-SwisNodeWithDefaultPollers {
     param(
         [Parameter(Mandatory = $true)] $Swis,
         [Parameter(Mandatory = $true)] [string]$IPAddress,
-        [string]$Name = ""
+        [string]$Name = "",
+        [string]$Community = "public",
+        [string]$RWCommunity = ""
     )
 
     $newNodeProps = @{
@@ -18,6 +20,8 @@ function Add-SwisNodeWithDefaultPollers {
         # SNMP v2 specific
         ObjectSubType = "SNMP";
         SNMPVersion = 2;
+        Community = $Community;
+        RWCommunity = $RWCommunity;
 
         DNS = "";
         SysName = "";
@@ -55,4 +59,4 @@ function Add-SwisNodeWithDefaultPollers {
 # $cred = New-Object -typename System.Management.Automation.PSCredential -argumentlist $username, $password
 # $swis = Connect-Swis -host $hostname -cred $cred
 #
-# Add-SwisNodeWithDefaultPollers -Swis $swis -Name "fw-member-1" -IPAddress "10.0.0.1"
+# Add-SwisNodeWithDefaultPollers -Swis $swis -Name "fw-member-1" -IPAddress "10.0.0.1" -Community "public"

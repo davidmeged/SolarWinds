@@ -31,6 +31,7 @@ $swHostname = "localhost"
 $swUsername = "admin"
 $swPassword = New-Object System.Security.SecureString
 $swCred = New-Object -typename System.Management.Automation.PSCredential -argumentlist $swUsername, $swPassword
+$swCommunity = "public"
 
 $cpSession = Connect-SmartConsole -Server $cpServer -Username $cpUsername -Password $cpPassword
 
@@ -55,5 +56,5 @@ foreach ($fw in $firewalls) {
     }
 
     Write-Host "Adding node '$($fw.MemberName)' ($($fw.MemberIp)) from cluster '$($fw.ClusterName)'..."
-    Add-SwisNodeWithDefaultPollers -Swis $swis -Name $fw.MemberName -IPAddress $fw.MemberIp | Out-Null
+    Add-SwisNodeWithDefaultPollers -Swis $swis -Name $fw.MemberName -IPAddress $fw.MemberIp -Community $swCommunity | Out-Null
 }

@@ -16,7 +16,8 @@
 param(
     [string]$CsvPath = ".\ClusterFirewalls.csv",
     [string]$NameColumn = "MemberName",
-    [string]$IpColumn = "MemberIp"
+    [string]$IpColumn = "MemberIp",
+    [string]$Community = "public"
 )
 
 # Dot-source the shared node-creation helper (Add-SwisNodeWithDefaultPollers).
@@ -41,5 +42,5 @@ foreach ($row in $rows) {
     }
 
     Write-Host "Adding node '$name' ($ip)..."
-    Add-SwisNodeWithDefaultPollers -Swis $swis -Name $name -IPAddress $ip | Out-Null
+    Add-SwisNodeWithDefaultPollers -Swis $swis -Name $name -IPAddress $ip -Community $Community | Out-Null
 }
