@@ -218,9 +218,9 @@ function Add-DiscoveredInterfaces {
     # Add the remaining interfaces
     try {
         Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-        Write-Host " Added $interfaceCount interface[s] for node $nodeId." -ForegroundColor Green
+        Write-Host " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
     } catch {
-        Write-Host " Failed to add interfaces for node $nodeId : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
