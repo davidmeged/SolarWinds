@@ -252,7 +252,7 @@ foreach ($component in $components) {
 # --- Logout from SmartConsole ---
 if ($sid) {
     try {
-        $urlForLogout = "https:///web_api/logout"
+        $urlForLogout = "https://web_api/logout"
         Invoke-WebRequest -Uri $urlForLogout -Headers $header -Body (@{} | ConvertTo-Json) -Method Post -SkipCertificateCheck | Out-Null
         Write-Host "Logged out from SmartConsole session." -ForegroundColor Green
     } catch {
