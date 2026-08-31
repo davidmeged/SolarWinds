@@ -1,0 +1,72 @@
+SELECT
+
+    CASE
+    WHEN AO.AlertConfigurations.Severity = 0 THEN 5
+    WHEN AO.AlertConfigurations.Severity = 1 THEN 3
+    WHEN AO.AlertConfigurations.Severity = 2 THEN 14
+    WHEN AO.AlertConfigurations.Severity = 3 THEN 10 End as [SeverityIcon]
+
+    ,CASE
+    WHEN AO.AlertConfigurations.Severity = 0 THEN 'Informational'
+    WHEN AO.AlertConfigurations.Severity = 1 THEN 'Warning'
+    WHEN AO.AlertConfigurations.Severity = 2 THEN 'Critical'
+    WHEN AO.AlertConfigurations.Severity = 3 THEN 'Serious' End as [Severity]
+
+    ,CASE
+    WHEN AO.AlertConfigurations.Severity = 0 then 500000000
+    WHEN AO.AlertConfigurations.Severity = 4 then 400000000
+    WHEN AO.AlertConfigurations.Severity = 1 then 300000000
+    WHEN AO.AlertConfigurations.Severity = 3 then 200000000
+    WHEN AO.AlertConfigurations.Severity = 2 then 100000000 END
+
++
+
+    CASE
+    WHEN TriggeredMessage LIKE '%Node is down%' then 10000000
+    WHEN TriggeredMessage LIKE '%Interface is down%' THEN 20000000
+    ELSE 30000000 END
+
++
+
+    MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE()) as SeveritySort
+    ,toString(tolocal(AA.TriggeredDateTime)) as TriggerTime
+
+
+    ,CASE
+    WHEN AO.RelatedNodeCaption IS NOT NULL
+    THEN AO.RelatedNodeCaption
+    ELSE AO.EntityCaption END AS [Object]
+
+    ,AO.RelatedNodeDetailsURL as [Object_Link]
+    ,AO.NODE.IP_ADDRESS as [IP ADDRESS]
+    ,CONCAT('<a href="/Orion/NetPerfMon/ActiveAlertDetails.aspx?NetObject=AAT:',AA.AlertObjectID,'">',AA.TriggeredMessage,'</a>') as [Alert]
+    ,CONCAT( CASE WHEN FLOOR(MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE())/1440.0000) > 0 THEN (TOSTRING(FLOOR(MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE())/1440.0000))+'d ') END
+    ,CASE WHEN FLOOR((MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE())%1440)/60.0000) > 0 THEN (TOSTRING(FLOOR((MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE())%1440)/60.0000))+'h ') END
+    ,CASE WHEN (MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE())%60) > 0 THEN (TOSTRING(FLOOR(MINUTEDIFF(AA.TriggeredDateTime,GETUTCDATE())%60))+'m ') END
+    ) as [Active Time]
+    ,isnull(note.Message,'') as [Notes]
+    ,case when AO.RelatedNodeId is not null then Concat('<a href="/Orion/SSH/Terminal.aspx?NodeId=',AO.RelatedNodeId,'">SSH</a>') End as [SSH]
+    ,case when AO.RelatedNodeId is not null then Concat('<a href="',c.DetailsUrl,'">',c.DisplayName,'</a>') End as Map
+
+FROM Orion.AlertActive AA
+
+JOIN Orion.AlertObjects AO on AA.AlertObjectID = AO.AlertObjectID
+LEFT JOIN (
+    SELECT AlertActiveID, MAX(Timestamp) AS MaxTimeStamp
+    FROM Orion.AlertHistory
+    WHERE EventType = 3
+    GROUP BY AlertActiveID
+) FirstNote on FirstNote.AlertActiveID = AA.AlertActiveID
+
+LEFT JOIN  Orion.AlertHistory note
+    ON note.AlertActiveID = FirstNote.AlertActiveID
+    AND note.TimeStamp = FirstNote.MaxTimeStamp
+    AND note.EventType = 3
+
+
+LEFT JOIN (SELECT MAX(c.ContainerID) as ID,c.DisplayName,c.Members.MemberPrimaryID as NodeID,c.DetailsUrl FROM Orion.Container c WHERE c.Owner = 'MAPS' GROUP BY c.Members.MemberPrimaryID) c on c.Nodeid = AO.RelatedNodeId
+
+WHERE aa.Acknowledged is null
+    and AO.AlertConfigurations.Severity in (2,3,1)
+    and AO.AlertConfigurations.Severity != 4
+    and AO.AlertConfigurations.CustomProperties.Alert_Tags is NULL
