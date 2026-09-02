@@ -6,6 +6,11 @@
     the term when it appears inside another word or combined with hyphens/underscores,
     e.g. searching for "server" will also match "fileserver", "server-01", "my_server", etc.
 
+    For every match it prints the file, the line number, the line itself and how many
+    times the term appears on that line, followed by an occurrence count per file and
+    an overall total. Folders and files that could not be opened (typically "access
+    denied") are not silently skipped - they are listed at the end with the reason.
+
     USAGE EXAMPLES:
 
         # Search for "server-01" under the current folder, in all files
@@ -63,9 +68,23 @@ function Get-OccurrenceCount {
     return $count
 }
 
-$files = Get-ChildItem -Path $Path -Include $Include -Recurse -File -ErrorAction SilentlyContinue
+function Show-InaccessiblePaths {
+    param($Items)
 
-$results = foreach ($file in $files) {
+    if (-not $Items) {
+        return
+    }
+
+    Write-Host "`nPaths that could not be accessed (skipped): $(@($Items).Count)" -ForegroundColor Yellow
+    $Items | Format-Table -AutoSize -Wrap
+}
+
+# Collect the enumeration errors instead of swallowing them, so folders that
+# could not be opened (usually "access denied") can be reported at the end
+# rather than silently skipped.
+$allFiles = Get-ChildItem -Path $Path -Include $Include -Recurse -File -ErrorAction SilentlyContinue -ErrorVariable accessErrors
+
+$results = foreach ($file in $allFiles) {
     $selectStringParams = @{
         Path        = $file.FullName
         Pattern     = $SearchTerm
@@ -76,11 +95,24 @@ $results = foreach ($file in $files) {
         $selectStringParams["CaseSensitive"] = $true
     }
 
-    Select-String @selectStringParams
+    Select-String @selectStringParams -ErrorVariable +accessErrors
 }
+
+# Folders/files that could not be read, with the reason. TargetObject holds the
+# path for these provider errors; fall back to the error text when it is empty.
+$inaccessible = $accessErrors |
+    ForEach-Object {
+        [PSCustomObject]@{
+            Path   = if ($_.TargetObject) { $_.TargetObject } else { $_.CategoryInfo.TargetName }
+            Reason = $_.Exception.Message
+        }
+    } |
+    Where-Object { $_.Path } |
+    Sort-Object Path -Unique
 
 if (-not $results) {
     Write-Host "No matches found for '$SearchTerm' under '$Path'."
+    Show-InaccessiblePaths -Items $inaccessible
     return
 }
 
@@ -107,3 +139,5 @@ $perFileCounts | Format-Table -AutoSize
 $totalOccurrences = ($perFileCounts | Measure-Object -Property Count -Sum).Sum
 Write-Host "`nTotal matching lines: $($results.Count)"
 Write-Host "Total occurrences of '$SearchTerm': $totalOccurrences"
+
+Show-InaccessiblePaths -Items $inaccessible
