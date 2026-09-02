@@ -111,7 +111,7 @@ $tokenString = $tokenObj.Token
 $results = Get-DNADevices -token $tokenString -url $dnaUrlDevices
 
 # Get ip address of devices from results function
-$addresses = $results.response.managementIpAddress -join "`n"
+$addresses = @($results.response.managementIpAddress)
 
 try {
     $swis = Connect-Swis -Host $hostname -UserName $username -Password $password.GetNetworkCredential().Password
@@ -122,10 +122,12 @@ try {
 }
 
 # --- Build the list of components to process ---
-if ($addressesForCluster) {
-    # Build $components from the -IPAddresses parameter (supports both
-    # "-IPAddresses ip1,ip2" and "-IPAddresses 'ip1,ip2'" invocation styles).
-    $components = $addressesForCluster |
+if ($addresses) {
+    # Build $components from the management IP addresses returned by DNA.
+    # Each entry is normally a single address, but a comma-separated value is
+    # split as well so the list can also be supplied by hand.
+    $components = $addresses |
+        Where-Object { $_ } |
         ForEach-Object { $_.Split(',') } |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ } |
