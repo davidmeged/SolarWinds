@@ -74,7 +74,7 @@ function Get-TokenDNA {
         "Content-Type" = "application/json"
         "Authorization" = "Basic $encode "
     }
-    $response = Invoke-WebRequest -Uri -Headers $header -Method Post -SkipCertificateCheck
+    $response = Invoke-WebRequest -Uri $uri -Headers $header -Method Post -SkipCertificateCheck
     return $response.Content | ConvertFrom-Json
 }
 
