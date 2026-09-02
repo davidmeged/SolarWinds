@@ -44,6 +44,25 @@ if (-not (Test-Path -LiteralPath $Path)) {
     return
 }
 
+function Get-OccurrenceCount {
+    param(
+        [string]$Text,
+        [string]$Term,
+        [switch]$CaseSensitive
+    )
+
+    $comparison = if ($CaseSensitive) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+
+    $count = 0
+    $index = 0
+    while (($index = $Text.IndexOf($Term, $index, $comparison)) -ge 0) {
+        $count++
+        $index += $Term.Length
+    }
+
+    return $count
+}
+
 $files = Get-ChildItem -Path $Path -Include $Include -Recurse -File -ErrorAction SilentlyContinue
 
 $results = foreach ($file in $files) {
@@ -65,10 +84,26 @@ if (-not $results) {
     return
 }
 
+# Print every matching line, from the file it was found in, with how many
+# times the search term appears on that specific line.
 $results |
     Select-Object @{Name = "File"; Expression = { $_.Path } },
                    @{Name = "Line"; Expression = { $_.LineNumber } },
-                   @{Name = "Text"; Expression = { $_.Line.Trim() } } |
+                   @{Name = "Text"; Expression = { $_.Line.Trim() } },
+                   @{Name = "Occurrences"; Expression = { Get-OccurrenceCount -Text $_.Line -Term $SearchTerm -CaseSensitive:$CaseSensitive } } |
     Format-Table -AutoSize -Wrap
 
-Write-Host "`nTotal matches: $($results.Count)"
+# Count how many times the word was found overall, and per file.
+$perFileCounts = $results | Group-Object Path | ForEach-Object {
+    [PSCustomObject]@{
+        File  = $_.Name
+        Count = ($_.Group | ForEach-Object { Get-OccurrenceCount -Text $_.Line -Term $SearchTerm -CaseSensitive:$CaseSensitive } | Measure-Object -Sum).Sum
+    }
+}
+
+Write-Host "Occurrences per file:"
+$perFileCounts | Format-Table -AutoSize
+
+$totalOccurrences = ($perFileCounts | Measure-Object -Property Count -Sum).Sum
+Write-Host "`nTotal matching lines: $($results.Count)"
+Write-Host "Total occurrences of '$SearchTerm': $totalOccurrences"
