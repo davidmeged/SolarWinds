@@ -33,6 +33,16 @@
     All write modes support -DryRun (report what would change, touch nothing) and
     -Backup (copy each modified file's original content aside before overwriting it).
 
+    REPORTING:
+
+      * Every changed line is printed under the file it belongs to, with its line
+        number, how many matches it contained, and the line before ("-") and after
+        ("+") the replacement.
+      * Each file reports its match count, and the run ends with the total number of
+        matches and changed lines across all files.
+      * Folders and files that could not be opened (typically "access denied") are
+        not skipped silently - they are listed at the end with their path and reason.
+
     USAGE EXAMPLES:
 
         # Preview the literal replacements only, no files modified
@@ -106,7 +116,11 @@ if ($Backup -and -not $BackupFolder) {
 }
 
 $resolvedRoot = (Resolve-Path -LiteralPath $Path).ProviderPath
-$allFiles = Get-ChildItem -Path $Path -Include $Include -Recurse -File -ErrorAction SilentlyContinue
+
+# Enumeration errors are collected instead of being swallowed, so folders that
+# could not be opened (typically "access denied") are reported at the end
+# rather than being skipped silently.
+$allFiles = Get-ChildItem -Path $Path -Include $Include -Recurse -File -ErrorAction SilentlyContinue -ErrorVariable accessErrors
 
 $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
 $switchNameRegex = [regex]::new($SwitchNamePattern, $ignoreCase)
@@ -141,36 +155,53 @@ function Get-PlaceholderName {
 
 $changedCount = 0
 $scannedCount = 0
+$totalMatchCount = 0
+$totalChangedLines = 0
+
+function Write-ChangedLines {
+    param([object[]]$Lines)
+
+    foreach ($changedLine in $Lines) {
+        Write-Host ("    line {0} ({1} match(es)):" -f $changedLine.Line, $changedLine.Matches) -ForegroundColor DarkGray
+        Write-Host ("      - {0}" -f $changedLine.Before) -ForegroundColor DarkRed
+        Write-Host ("      + {0}" -f $changedLine.After) -ForegroundColor DarkGreen
+    }
+}
 
 foreach ($fileItem in $allFiles) {
     $scannedCount++
 
-    $content = Get-Content -LiteralPath $fileItem.FullName -ErrorAction SilentlyContinue
+    $content = Get-Content -LiteralPath $fileItem.FullName -ErrorAction SilentlyContinue -ErrorVariable +accessErrors
     if ($null -eq $content) {
         continue
     }
 
     $fileMatchCount = 0
+    $fileChangedLines = [System.Collections.Generic.List[object]]::new()
+    $lineNumber = 0
+
     $updatedContent = foreach ($row in $content) {
+        $lineNumber++
         $currentRow = $row
+        $script:rowMatchCount = 0
 
         foreach ($search in $Replacements.Keys) {
             $lineMatches = [regex]::Matches($currentRow, $search).Count
             if ($lineMatches -gt 0) {
-                $fileMatchCount += $lineMatches
+                $script:rowMatchCount += $lineMatches
                 $currentRow = $currentRow -replace $search, $Replacements[$search]
             }
         }
 
         if ($StripPortDescriptions -and $portDescriptionRegex.IsMatch($currentRow)) {
-            $fileMatchCount++
+            $script:rowMatchCount++
             $currentRow = $portDescriptionRegex.Replace($currentRow, '${port}')
         }
 
         if ($AnonymizeSwitchNames) {
             $currentRow = $switchNameRegex.Replace($currentRow, {
                 param($match)
-                $script:fileMatchCount++
+                $script:rowMatchCount++
                 Get-PlaceholderName -OriginalValue $match.Value -Map $switchNameMap -Prefix $SwitchNamePrefix -IndexVarName "switchNameIndex"
             })
         }
@@ -178,7 +209,7 @@ foreach ($fileItem in $allFiles) {
         if ($AnonymizeUsernames) {
             $currentRow = $usernameRegex.Replace($currentRow, {
                 param($match)
-                $script:fileMatchCount++
+                $script:rowMatchCount++
                 Get-PlaceholderName -OriginalValue $match.Value -Map $usernameMap -Prefix $UsernamePrefix -IndexVarName "usernameIndex"
             })
         }
@@ -186,8 +217,20 @@ foreach ($fileItem in $allFiles) {
         if ($AnonymizeIPs) {
             $currentRow = $ipRegex.Replace($currentRow, {
                 param($match)
-                $script:fileMatchCount++
+                $script:rowMatchCount++
                 Get-PlaceholderName -OriginalValue $match.Value -Map $ipMap -Prefix $IPPrefix -IndexVarName "ipIndex"
+            })
+        }
+
+        # Keep the line itself, so every change can be printed with its line
+        # number and how many matches it contained.
+        if ($script:rowMatchCount -gt 0) {
+            $fileMatchCount += $script:rowMatchCount
+            $fileChangedLines.Add([PSCustomObject]@{
+                Line    = $lineNumber
+                Matches = $script:rowMatchCount
+                Before  = $row.Trim()
+                After   = $currentRow.Trim()
             })
         }
 
@@ -199,9 +242,12 @@ foreach ($fileItem in $allFiles) {
     }
 
     $changedCount++
+    $totalMatchCount += $fileMatchCount
+    $totalChangedLines += $fileChangedLines.Count
 
     if ($DryRun) {
-        Write-Host "[DryRun] Would update: $($fileItem.FullName) ($fileMatchCount match(es))" -ForegroundColor DarkYellow
+        Write-Host "[DryRun] Would update: $($fileItem.FullName) ($fileMatchCount match(es) on $($fileChangedLines.Count) line(s))" -ForegroundColor DarkYellow
+        Write-ChangedLines -Lines $fileChangedLines
         continue
     }
 
@@ -219,7 +265,8 @@ foreach ($fileItem in $allFiles) {
         Copy-Item -LiteralPath $fileItem.FullName -Destination $backupPath -Force
     }
 
-    Write-Host "Working on: $($fileItem.FullName) ($fileMatchCount match(es))" -ForegroundColor DarkYellow
+    Write-Host "Working on: $($fileItem.FullName) ($fileMatchCount match(es) on $($fileChangedLines.Count) line(s))" -ForegroundColor DarkYellow
+    Write-ChangedLines -Lines $fileChangedLines
     $updatedContent | Set-Content -LiteralPath $fileItem.FullName
 }
 
@@ -232,6 +279,8 @@ if ($DryRun) {
         Write-Host "Backups saved under: $BackupFolder" -ForegroundColor Green
     }
 }
+
+Write-Host "Total matches found: $totalMatchCount on $totalChangedLines line(s)." -ForegroundColor Green
 
 function Write-NameMapping {
     param([string]$Title, [System.Collections.Specialized.OrderedDictionary]$Map)
@@ -248,3 +297,20 @@ function Write-NameMapping {
 if ($AnonymizeSwitchNames) { Write-NameMapping -Title "Switch name" -Map $switchNameMap }
 if ($AnonymizeUsernames) { Write-NameMapping -Title "Username" -Map $usernameMap }
 if ($AnonymizeIPs) { Write-NameMapping -Title "IP address" -Map $ipMap }
+
+# Folders and files that could not be opened, with the reason. TargetObject holds
+# the path for these provider errors; fall back to the error's target name.
+$inaccessible = $accessErrors |
+    ForEach-Object {
+        [PSCustomObject]@{
+            Path   = if ($_.TargetObject) { $_.TargetObject } else { $_.CategoryInfo.TargetName }
+            Reason = $_.Exception.Message
+        }
+    } |
+    Where-Object { $_.Path } |
+    Sort-Object Path -Unique
+
+if ($inaccessible) {
+    Write-Host "`nPaths that could not be accessed and were skipped: $(@($inaccessible).Count)" -ForegroundColor Yellow
+    $inaccessible | Format-Table -AutoSize -Wrap
+}
