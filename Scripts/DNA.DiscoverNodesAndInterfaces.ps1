@@ -45,9 +45,9 @@ $username = ""
 $password = Import-Clixml -Path ".\Credentials\SolarWindsCredential.xml"
 
 # --- Connect to DNA ---
-$dnsServer = ""
+$dnaServer = ""
 $dnaUrlToken = "https://$($dnaServer)/dna/system/api/v1/auth/token"
-$dnaUrlDevices "https://$($dnaServer)/dna/intent/api/v1/network-devices"
+$dnaUrlDevices = "https://$($dnaServer)/dna/intent/api/v1/network-devices"
 $dnaCredentials = Import-Clixml -Path ""
 
 function Get-TokenDNA {
@@ -102,7 +102,7 @@ function Get-DNADevices {
 }
 
 # Call function "Get-TokenDNA"
-$tokenObj = Get-DNADevices -uri $dnaUrlToken -user $dnaCredentials.UserName -pass $dnaCredentials.GetNetworkCredential().password
+$tokenObj = Get-TokenDNA -uri $dnaUrlToken -user $dnaCredentials.UserName -pass $dnaCredentials.GetNetworkCredential().password
 
 # Get Token from results function
 $tokenString = $tokenObj.Token
