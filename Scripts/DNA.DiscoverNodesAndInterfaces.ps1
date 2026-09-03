@@ -20,23 +20,16 @@
     Please update the hostname/credential setup below to match your
     environment before running.
 
-    The list of components (nodes) can be supplied via the -IPAddresses
-    parameter, e.g.:
-        .\NPM.DiscoverComponentsAndInterfaces.ps1 -IPAddresses "10.0.0.1","10.0.0.2","10.0.0.3"
-        .\NPM.DiscoverComponentsAndInterfaces.ps1 -IPAddresses "10.0.0.1,10.0.0.2,10.0.0.3"
-
-    If -IPAddresses is not supplied, the sample list below is used instead.
+    The list of components (nodes) is retrieved automatically from the
+    Cisco DNA Center inventory: every device the DNA API reports is added
+    by its management IP address.
 #>
 
 param(
-    # One or more IP addresses to add/discover. Accepts either an array of
-    # strings or a single comma-separated string.
-    [string[]]$IPAddresses,
-
-    # Shared settings applied to every IP address passed via -IPAddresses.
+    # Shared settings applied to every device retrieved from DNA.
     [int]$EngineID = 2,
     [int]$SNMPVersion = 2,
-    [string]$SNMPCommunnity = ''
+    [string]$SNMPCommunity = ''
 )
 
 # --- Connect to SWIS ---
@@ -97,21 +90,56 @@ function Get-DNADevices {
         "Content-Type" = "application/json"
         "x-auth-token" = $token
     }
-    $allDevices = Invoke-WebRequest -Uri $url -Headers $header -Method Get -SkipCertificateCheck
-    return $allDevices.Content | ConvertFrom-Json
+
+    # The DNA inventory is returned one page at a time, so keep asking for
+    # the next page until one comes back shorter than the page size.
+    $devices  = @()
+    $pageSize = 500
+    $offset   = 1   # the DNA device inventory is 1-based
+
+    do {
+        $pageUri  = "$($url)?offset=$($offset)&limit=$($pageSize)"
+        $response = Invoke-WebRequest -Uri $pageUri -Headers $header -Method Get -SkipCertificateCheck
+        $page     = @(($response.Content | ConvertFrom-Json).response)
+
+        $devices += $page
+        $offset  += $pageSize
+    } while ($page.Count -eq $pageSize)
+
+    return $devices
 }
 
 # Call function "Get-TokenDNA"
-$tokenObj = Get-TokenDNA -uri $dnaUrlToken -user $dnaCredentials.UserName -pass $dnaCredentials.GetNetworkCredential().password
+try {
+    $tokenObj = Get-TokenDNA -uri $dnaUrlToken -user $dnaCredentials.UserName -pass $dnaCredentials.GetNetworkCredential().password
 
-# Get Token from results function
-$tokenString = $tokenObj.Token
+    # Get Token from results function
+    $tokenString = $tokenObj.Token
+
+    if (-not $tokenString) {
+        Write-Error "DNA authentication did not return a token. Check URL/credentials."
+        exit
+    }
+} catch {
+    Write-Error "Failed to authenticate with DNA: $($_.Exception.Message)"
+    exit
+}
 
 # Call function "Get-DNADevices"
-$results = Get-DNADevices -token $tokenString -url $dnaUrlDevices
+try {
+    $results = Get-DNADevices -token $tokenString -url $dnaUrlDevices
+} catch {
+    Write-Error "Failed to retrieve devices from DNA: $($_.Exception.Message)"
+    exit
+}
 
 # Get ip address of devices from results function
-$addresses = @($results.response.managementIpAddress)
+$addresses = @($results.managementIpAddress)
+
+if (-not $addresses) {
+    Write-Warning "DNA returned no devices - nothing to process."
+    exit
+}
 
 try {
     $swis = Connect-Swis -Host $hostname -UserName $username -Password $password.GetNetworkCredential().Password
@@ -138,7 +166,7 @@ if ($addresses) {
                 SNMPVersion = $SNMPVersion
                 DNS         = ""
                 SysName     = ""
-                Community   = $SNMPCommunnity
+                Community   = $SNMPCommunity
             }
         }
 }
@@ -209,12 +237,20 @@ function Add-DiscoveredInterfaces {
         $_.ifOperStatus -match '2'
     } | ForEach-Object { $discovered.DiscoveredInterfaces.RemoveChild($_) } | Out-Null
 
-    $interfaceCount = $discovered.DiscoveredInterfaces.DiscoveredLiteInterface.Count
+    $interfaceCount = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface).Count
+
+    if ($interfaceCount -eq 0) {
+        Write-Host " No interfaces left to add for node $($nodeId) after filtering." -ForegroundColor DarkBlue
+        return
+    }
 
     # Add the remaining interfaces
-    Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-
-    Write-Host " Added $interfaceCount interface[s] for node $nodeId." -ForegroundColor Green
+    try {
+        Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
+        Write-Host " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
+    } catch {
+        Write-Host " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
 # --- Main Loop: Process each component ---
