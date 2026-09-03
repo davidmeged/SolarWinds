@@ -231,13 +231,12 @@ function Add-DiscoveredInterfaces {
     # Keep only TenGigabit and Port-channel interfaces that are operationally
     # up (ifOperStatus 1). Both the long captions and the abbreviated Cisco
     # forms are accepted; everything else is removed before the add.
-    $keepPattern = '^(TenGigabitEthernet|TenGigE|Te\d|Port-channel|Po\d)'
-
+    #
     # The node list is materialised with @() first: RemoveChild shrinks the
     # live XmlNodeList, and removing from it while the pipeline is still
     # enumerating it skips nodes.
     @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface) | Where-Object {
-        $_.Caption.InnerText -notmatch $keepPattern -or
+        $_.Caption.InnerText -notmatch '^(TenGigabitEthernet|TenGigE|Te\d|Port-channel|Po\d)' -or
         $_.ifOperStatus -ne '1'
     } | ForEach-Object { $discovered.DiscoveredInterfaces.RemoveChild($_) | Out-Null }
 
