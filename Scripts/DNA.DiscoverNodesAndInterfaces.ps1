@@ -109,6 +109,36 @@ function Get-DNADevices {
     return $devices
 }
 
+function Stop-Sessions {
+    <#
+    .SYNOPSIS
+        End the DNA and SWIS sessions opened by this script
+    .DESCRIPTION
+        Cisco DNA Center publishes no token revocation endpoint - the token
+        is only valid for an hour and then expires on its own - so dropping
+        it from memory is the whole of the cleanup available on that side.
+
+        SWIS has no Disconnect-Swis cmdlet either, but Connect-Swis returns
+        an InfoServiceProxy, which is IDisposable, so the connection can be
+        closed explicitly instead of being left to the finalizer.
+    #>
+    if ($script:tokenString) {
+        $script:tokenObj    = $null
+        $script:tokenString = $null
+        Write-Host "Discarded the DNA API token." -ForegroundColor Green
+    }
+
+    if ($script:swis) {
+        try {
+            $script:swis.Close()
+            Write-Host "Closed the SWIS connection." -ForegroundColor Green
+        } catch {
+            Write-Warning "Failed to close the SWIS connection: $($_.Exception.Message)"
+        }
+        $script:swis = $null
+    }
+}
+
 # Call function "Get-TokenDNA"
 try {
     $tokenObj = Get-TokenDNA -uri $dnaUrlToken -user $dnaCredentials.UserName -pass $dnaCredentials.GetNetworkCredential().password
@@ -118,10 +148,12 @@ try {
 
     if (-not $tokenString) {
         Write-Error "DNA authentication did not return a token. Check URL/credentials."
+        Stop-Sessions
         exit
     }
 } catch {
     Write-Error "Failed to authenticate with DNA: $($_.Exception.Message)"
+    Stop-Sessions
     exit
 }
 
@@ -130,6 +162,7 @@ try {
     $results = Get-DNADevices -token $tokenString -url $dnaUrlDevices
 } catch {
     Write-Error "Failed to retrieve devices from DNA: $($_.Exception.Message)"
+    Stop-Sessions
     exit
 }
 
@@ -138,6 +171,7 @@ $addresses = @($results.managementIpAddress)
 
 if (-not $addresses) {
     Write-Warning "DNA returned no devices - nothing to process."
+    Stop-Sessions
     exit
 }
 
@@ -146,6 +180,7 @@ try {
     Write-Host "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
 } catch {
     Write-Error "Failed to connect to SWIS: $($_.Exception.Message)"
+    Stop-Sessions
     exit
 }
 
@@ -280,5 +315,8 @@ foreach ($component in $components) {
         Write-Host " Failed to process $($component.IPAddress): $($_.Exception.Message)"
     }
 }
+
+# --- End the DNA and SWIS sessions ---
+Stop-Sessions
 
 Write-Host "Script completed."
