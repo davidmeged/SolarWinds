@@ -38,6 +38,7 @@
 2. הצגת 5 האירועים האחרונים מלוג `System` (`Get-EventLog` או `Get-WinEvent`).
 
 אחר כך:
+
 3. הריצו `Get-ChildItem C:\Windows` עם פרמטר מסוג **Switch** שמציג רק תיקיות.
 4. הריצו אותו שוב כך שיציג רק קבצים, כולל קבצים מוסתרים.
 5. בעזרת `Get-Help Get-ChildItem -Parameter Path` בדקו: האם `-Path` חובה? מה המיקום (Position) שלו? האם הוא מקבל קלט מה-Pipeline?
