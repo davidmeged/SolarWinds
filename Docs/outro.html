@@ -1,0 +1,63 @@
+<h2>‏5. השוואה, מצב הבדיקות ומה לאמת לפני הרצה</h2>
+
+<h3>איך שלושת הסקריפטים מחליטים</h3>
+
+<table>
+  <tr><th>היבט</th><th>א' — מקורי</th><th>ב' — מתוקן</th><th>ג' — בלי Alteon</th></tr>
+  <tr><td>אות הבריאות</td><td>SNMP ל-LB</td><td>SNMP ל-LB</td><td>מי פעיל ב-SolarWinds</td></tr>
+  <tr><td>תלות ביצרן</td><td>Radware</td><td>Radware</td><td>אין</td></tr>
+  <tr><td>יעד הרשומה</td><td>LB בלבד</td><td>LB בלבד</td><td>השרת, או LB לפי פרמטר</td></tr>
+  <tr><td>‏LB לא זמין</td><td>הסקריפט קורס, אין failover</td><td>החלטה לפי <code>-SnmpFailureMode</code></td><td>לא רלוונטי</td></tr>
+  <tr><td>חוסר ידיעה</td><td>נראה כמו נפילה</td><td>מצב <code>Unknown</code> נפרד</td><td>תמיד משאיר את הרשומה</td></tr>
+  <tr><td>הגנת flapping</td><td>אין</td><td><code>-PollCount</code></td><td><code>-AttemptCount</code></td></tr>
+  <tr><td>לוג</td><td><code>Write-Host aaaaa</code></td><td>קובץ עם חותמות זמן</td><td>קובץ נפרד משלו</td></tr>
+  <tr><td>ולידציה</td><td>אין</td><td><code>param()</code> מלא</td><td><code>param()</code> מלא</td></tr>
+  <tr><td>‏<code>-WhatIf</code></td><td>אין</td><td>יש</td><td>יש</td></tr>
+  <tr><td>קודי יציאה</td><td>אין</td><td>0 / 1 / 2</td><td>0 / 1 / 2</td></tr>
+</table>
+
+<h3>מתי להשתמש באיזה</h3>
+
+<p><span class="lbl">סקריפט ב'</span> מתאים כשה-LB הוא חלק אמיתי מהארכיטקטורה ומצב שרתי ה-web הוא האות הנכון. הוא רואה תקלה שסקריפט ג' לא יראה: שרתי web שנפלו בזמן ששרת ה-SolarWinds עצמו חי ובריא.</p>
+
+<p><span class="lbl">סקריפט ג'</span> מתאים כשאין LB, כשלא רוצים תלות ביצרן, או כשהשאלה האמיתית היא פשוט מי הצד הפעיל. הוא גם קל בהרבה לתפעול: אין OID-ים להתחזק ואין community string לנהל.</p>
+
+<h3>מצב הבדיקות</h3>
+
+<p>שני הסקריפטים המתוקנים נבדקו מול תחליפים לפקודות Windows ו-SolarWinds, כך שהלוגיקה נבדקת בלי לגעת ב-DNS או בציוד אמיתי:</p>
+
+<table>
+  <tr><th>סקריפט</th><th>תרחישים</th><th>מה נבדק</th></tr>
+  <tr><td>ב' — מתוקן</td><td>17, כולם עוברים</td><td>failover לשני הכיוונים, שרת בודד למעלה, רשומה כבר נכונה, כשל SNMP בשני המצבים, רשומות כפולות, היעדר רשומה, ערך לא תקין, <code>-WhatIf</code>, ולידציות</td></tr>
+  <tr><td>ג' — בלי Alteon</td><td>28, כולם עוברים</td><td>שלוש שיטות הזיהוי, כל ארבעת מצבי הכשל של שאילתת ה-HA, נפילת שרת ב-Probe, פורט מסורב, יעדי LB חלופיים, <code>-WhatIf</code>, ולידציות</td></tr>
+</table>
+
+<div class="note">
+<p><span class="lbl">מה הבדיקות לא מוכיחות.</span> הן מאמתות את הלוגיקה, לא את ההתנהגות מול ציוד Radware אמיתי, מול שרת DNS אמיתי או מול Orion אמיתי. הן אינן תחליף להרצה מבוקרת בסביבת מעבדה.</p>
+</div>
+
+<h3>שתי הנחות שחייבות אימות</h3>
+
+<div class="warn">
+<p><span class="lbl">1. בסקריפטים א' ו-ב': הערך 0 מ-SNMP פירושו "השרת למעלה".</span></p>
+<p>זהו הערך שהגרסה המקורית השוותה מולו, והוא נשמר כברירת מחדל. אם בפועל 0 אינו מסמן שרת תקין על ה-LB שלכם, <span class="lbl">כל ההחלטות מתהפכות</span> — הסקריפט יבצע failover כששרתים תקינים ויישאר במקום כשהם נפלו.</p>
+<p>הבדיקה: <code>snmpwalk</code> על ה-OID-ים מול שרת תקין ומול שרת מושבת. הפרמטר <code>-HealthyValue</code> מאפשר לשנות בלי לגעת בקוד.</p>
+</div>
+
+<div class="warn">
+<p><span class="lbl">2. בסקריפט ג': שאילתת ה-HA מתאימה לגרסת ה-Orion שלכם.</span></p>
+<p>סכמת ה-HA ב-SWIS משתנה בין גרסאות, והשאילתה שבברירת המחדל לא נבדקה מול שרת חי. הסקריפט בנוי כך שכל דרך שבה היא עלולה לחזור שגויה — אפס שורות, כמה שורות, חסרה עמודת <code>IPAddress</code>, כתובת ריקה — מדווחת בהודעה נפרדת שאומרת מה לתקן, במקום לקרוס.</p>
+<p>הבדיקה: להריץ את השאילתה ב-SWQL Studio. הפרמטר <code>-HaQuery</code> מאפשר להחליף אותה בלי לגעת בקוד.</p>
+</div>
+
+<h3>מה עוד לבדוק לפני הרצה אמיתית</h3>
+
+<ol>
+  <li><span class="lbl">שרת ה-DNS הוא Primary של ה-Zone.</span> כתיבה לעותק שאינו בר-כתיבה תיכשל. במקרה של ספק עדיף להעביר <code>-DnsServer</code> מפורש.</li>
+  <li><span class="lbl">ה-TTL של הרשומה.</span> TTL של שעה פירושו ש-failover ייכנס לתוקף רק בעוד שעה. ערך של 30 עד 60 שניות מתאים לרשומה שנועדה להתחלף.</li>
+  <li><span class="lbl">מחרוזת ה-SNMP community</span> (בסקריפטים א' ו-ב'). <code>public</code> הוא ברירת מחדל, לא המלצה.</li>
+  <li><span class="lbl">להריץ פעם אחת עם <code>-WhatIf</code></span> ולקרוא את הלוג לפני שנותנים לסקריפט לכתוב ל-DNS ייצור.</li>
+  <li><span class="lbl">להפעיל עם <code>-File</code> ולא עם <code>-Command</code></span>, אחרת טעות בפרמטרים תיראה כמו ריצה מוצלחת.</li>
+</ol>
+
+<p class="footer">מסמך זה מתעד את הסקריפטים שתחת <span class="en">Scripts/</span> בריפוזיטורי: <span class="en">DNS.SetSolarWindsRecordToActiveLB.ps1</span>, <span class="en">DNS.SetSolarWindsRecordToActiveLB.v2.ps1</span> ו-<span class="en">DNS.SetSolarWindsRecordToActiveServer.ps1</span>. הקוד המוצג נשלף אוטומטית מקבצי המקור לפי טווחי שורות, כך שהוא זהה לקוד שבריפו. כתובות ה-IP, שם ה-Zone ושם הרשומה המופיעים כאן הם ערכי ברירת המחדל שבקוד, וניתן לשנות כל אחד מהם בפרמטר בלי לערוך את הסקריפטים.</p>
