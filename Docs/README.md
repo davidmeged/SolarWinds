@@ -43,3 +43,7 @@ python -c "from weasyprint import HTML; HTML(filename='doc.html', base_url='.').
 Line numbers move, so the block starts move with them. Adjust the `start_line`
 values in the matching `blocks_*.py` and rebuild; the coverage check will point
 at any range left inconsistent.
+
+## Fonts
+
+`fonts/` is not checked in — the rebuild steps above recreate it.

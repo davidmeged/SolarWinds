@@ -2,124 +2,71 @@
 
 <#
 .SYNOPSIS
-    Points the SolarWinds DNS record at whichever SolarWinds server is currently
-    the active one. No load balancer and no web servers are involved.
+    Points the SolarWinds DNS record at the SolarWinds server that has just
+    become active. No load balancer, no web servers, no SNMP.
 
 .DESCRIPTION
     This is the Alteon-free variant of DNS.SetSolarWindsRecordToActiveLB.v2.ps1.
-    Where that script asks a Radware load balancer over SNMP how the web servers
-    behind it are doing, this one asks a simpler question: which SolarWinds
-    server is active right now? The record then follows that answer.
+    That script asks a Radware load balancer over SNMP how the web servers
+    behind it are doing, and picks a load balancer accordingly. This one does
+    not ask anything: it is told which SolarWinds server is now active, and
+    points the record straight at it.
 
-    The active server is found in one of three ways, chosen with
-    -DetectionMethod:
+    Being told is the point. SolarWinds decided which server is active, so
+    SolarWinds is the authority on it. Anything the script worked out for
+    itself would at best reproduce that answer and at worst contradict it.
 
-      Ha      Ask SolarWinds itself, over SWIS, which member of the High
-              Availability pool is active. This is the only method that can tell
-              an active server from a standby one that is merely switched on.
+    It is meant to run as an alert action on the server that has just become
+    active, with that server's address passed in -ActiveServer. Nothing is
+    written when the record already holds the wanted address, so it is also
+    safe to run on a schedule.
 
-      Probe   Open a TCP connection to each SolarWinds server in turn and treat
-              the first one that accepts as active, -PreferredDc first. Needs no
-              credentials and no SWIS, but it reports reachability, not role: in
-              an HA pair where both servers answer, it always names the
-              preferred one.
+.PARAMETER ActiveServer
+    The address of the SolarWinds server that is now active, and the address
+    the record will be pointed at. It has to match either PrimaryDcSolarWindsIp
+    or SecondaryDcSolarWindsIp, otherwise the script fails instead of quietly
+    doing nothing.
 
-      Manual  Use the address passed in -ActiveServer, the way the alert action
-              already calls the original script.
+.PARAMETER DnsServer
+    The DNS server to read the record from and write it back to. It has to hold
+    a writable copy of the zone. When it is left out the script walks the DNS
+    servers configured on this host and takes the first one that answers a ping.
 
-    Nothing is written when the record already holds the wanted address, so the
-    script is safe to run on a schedule.
-
-.PARAMETER DetectionMethod
-    How to find the active server: Ha, Probe or Manual. See the description.
-
-.PARAMETER HaQuery
-    The SWQL the Ha method runs. It has to return one row per ACTIVE member,
-    with a column named IPAddress. The default is written against the HA pool
-    entities, but SWIS schemas differ between Orion versions, so verify it with
-    SolarWinds' own SWQL Studio before relying on it. A query that returns no
-    rows, several rows, or no IPAddress column stops the run with an error that
-    says which of the three happened.
-
-.PARAMETER PrimaryDcTargetIp
-    The address written to the record when PrimaryDC is the active side. It
-    defaults to the PrimaryDC SolarWinds server itself, so out of the box the
-    record points straight at the server and no load balancer is in the path.
-    If a load balancer does still front SolarWinds, pass its VIP here instead;
-    the script neither knows nor cares what kind of device answers.
-
-.PARAMETER ProbePort
-    The TCP port the Probe method opens. The default, 17778, is the SolarWinds
-    Information Service port.
+.PARAMETER RecordTtlSeconds
+    When greater than zero, the TTL written onto the record. A failover only
+    takes effect once the old TTL has expired everywhere, so a low value (30-60)
+    is worth setting here.
 
 .EXAMPLE
-    .\DNS.SetSolarWindsRecordToActiveServer.ps1 -DetectionMethod Probe -WhatIf
+    .\DNS.SetSolarWindsRecordToActiveServer.ps1 -ActiveServer 10.10.10.1 -WhatIf
 
-    Shows which server would be picked, and what would change, without touching
-    DNS and without needing SWIS credentials.
-
-.EXAMPLE
-    .\DNS.SetSolarWindsRecordToActiveServer.ps1 -SwisHost 10.10.10.1 -SwisCredential $cred
-
-    Asks the SolarWinds HA pool which member is active and repoints the record.
+    Shows what would change without touching DNS.
 
 .EXAMPLE
-    .\DNS.SetSolarWindsRecordToActiveServer.ps1 -DetectionMethod Manual -ActiveServer 10.10.20.1
+    .\DNS.SetSolarWindsRecordToActiveServer.ps1 -ActiveServer 10.10.20.1
 
 .NOTES
-    Exit codes: 0 done (changed or nothing to change), 1 failed, 2 the active
-    server could not be determined and the record was left alone.
+    Exit codes: 0 done (changed or nothing to change), 1 failed.
 
     Call it with -File, not -Command:
 
-        powershell.exe -NoProfile -File DNS.SetSolarWindsRecordToActiveServer.ps1 -DetectionMethod Probe
+        powershell.exe -NoProfile -File DNS.SetSolarWindsRecordToActiveServer.ps1 -ActiveServer 10.10.10.1
 
     A parameter that fails validation stops the script before it runs, and only
     -File turns that into exit code 1. Under -Command the caller reads a stale
     $LASTEXITCODE instead, so a typo in the arguments looks like a clean run.
 
-    The Ha method needs the SwisPowerShell module, the same one the other
-    scripts in this repository use.
+    The record points at the SolarWinds server itself. If a load balancer sits
+    in front of SolarWinds in your environment, this is the wrong script for it:
+    use DNS.SetSolarWindsRecordToActiveLB.v2.ps1, which picks between the two
+    load balancers on the health of the web servers behind them.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('Ha', 'Probe', 'Manual')]
-    [string] $DetectionMethod = 'Ha',
-
+    [Parameter(Mandatory, Position = 0)]
+    [ValidateNotNullOrEmpty()]
     [string] $ActiveServer,
-
-    [string] $SwisHost,
-
-    [pscredential] $SwisCredential,
-
-    [ValidateNotNullOrEmpty()]
-    [string] $HaQuery = @'
-SELECT m.IPAddress AS IPAddress
-FROM Orion.HA.PoolMembers m
-WHERE m.IsActive = 1
-'@,
-
-    [ValidateRange(1, 65535)]
-    [int] $ProbePort = 17778,
-
-    [ValidateRange(100, 30000)]
-    [int] $ProbeTimeoutMs = 3000,
-
-    [ValidateSet('PrimaryDC', 'SecondaryDC')]
-    [string] $PreferredDc = 'PrimaryDC',
-
-    [ValidateNotNullOrEmpty()]
-    [string] $PrimaryDcSolarWindsIp = '10.10.10.1',
-
-    [ValidateNotNullOrEmpty()]
-    [string] $SecondaryDcSolarWindsIp = '10.10.20.1',
-
-    [ValidateNotNullOrEmpty()]
-    [string] $PrimaryDcTargetIp = $PrimaryDcSolarWindsIp,
-
-    [ValidateNotNullOrEmpty()]
-    [string] $SecondaryDcTargetIp = $SecondaryDcSolarWindsIp,
 
     [ValidateNotNullOrEmpty()]
     [string] $RecordName = 'OurSolar',
@@ -129,11 +76,11 @@ WHERE m.IsActive = 1
 
     [string] $DnsServer,
 
-    [ValidateRange(1, 10)]
-    [int] $AttemptCount = 3,
+    [ValidateNotNullOrEmpty()]
+    [string] $PrimaryDcSolarWindsIp = '10.10.10.1',
 
-    [ValidateRange(0, 60)]
-    [int] $AttemptDelaySeconds = 5,
+    [ValidateNotNullOrEmpty()]
+    [string] $SecondaryDcSolarWindsIp = '10.10.20.1',
 
     [ValidateRange(0, 86400)]
     [int] $RecordTtlSeconds = 0,
@@ -194,153 +141,6 @@ function Resolve-DnsServerAddress {
     throw 'None of the DNS servers configured on this host answered a ping. Pass -DnsServer to name one explicitly.'
 }
 
-function Test-TcpPort {
-    # A plain TCP connect with a timeout. Test-NetConnection would do the same
-    # job but takes seconds per call and cannot be told to give up early.
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory)][string] $ComputerName,
-        [Parameter(Mandatory)][int] $Port,
-        [Parameter(Mandatory)][int] $TimeoutMs
-    )
-
-    $client = $null
-    try {
-        $client = New-Object System.Net.Sockets.TcpClient
-        $async = $client.BeginConnect($ComputerName, $Port, $null, $null)
-
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
-            return $false
-        }
-
-        $client.EndConnect($async)
-        return $true
-    }
-    catch {
-        return $false
-    }
-    finally {
-        if ($client) {
-            try { $client.Close() } catch { }
-        }
-    }
-}
-
-function Get-ActiveServerByProbe {
-    # Reports which SolarWinds server is REACHABLE, which is not the same as
-    # which one is active. In an HA pair both members usually accept
-    # connections, so the preferred side always wins here. Use the Ha method
-    # when the difference matters.
-    [OutputType([string])]
-    param()
-
-    $order = if ($PreferredDc -eq 'PrimaryDC') {
-        @(@{ Name = 'PrimaryDC'; Ip = $PrimaryDcSolarWindsIp },
-          @{ Name = 'SecondaryDC'; Ip = $SecondaryDcSolarWindsIp })
-    }
-    else {
-        @(@{ Name = 'SecondaryDC'; Ip = $SecondaryDcSolarWindsIp },
-          @{ Name = 'PrimaryDC'; Ip = $PrimaryDcSolarWindsIp })
-    }
-
-    foreach ($candidate in $order) {
-        Write-Log "Probing the $($candidate.Name) SolarWinds server at $($candidate.Ip) on TCP $ProbePort."
-
-        if (Test-TcpPort -ComputerName $candidate.Ip -Port $ProbePort -TimeoutMs $ProbeTimeoutMs) {
-            Write-Log "$($candidate.Name) at $($candidate.Ip) accepted the connection."
-            return [string]$candidate.Ip
-        }
-
-        Write-Log "$($candidate.Name) at $($candidate.Ip) did not accept a connection." -Level WARN
-    }
-
-    return $null
-}
-
-function Get-ActiveServerFromHa {
-    # Asks SolarWinds which HA pool member is active. The query is a parameter
-    # because the HA entities differ between Orion versions; every way it can
-    # come back wrong is reported as its own message rather than as a crash.
-    [OutputType([string])]
-    param()
-
-    if (-not (Get-Module -ListAvailable -Name SwisPowerShell)) {
-        throw 'The SwisPowerShell module is not installed, so -DetectionMethod Ha cannot run. Install it, or use -DetectionMethod Probe.'
-    }
-
-    Import-Module SwisPowerShell -ErrorAction Stop
-
-    $target = if ($SwisHost) { $SwisHost } else { $PrimaryDcSolarWindsIp }
-    Write-Log "Asking SolarWinds at $target which HA pool member is active."
-
-    $connection = if ($SwisCredential) {
-        Connect-Swis -Host $target -Credential $SwisCredential
-    }
-    else {
-        Connect-Swis -Host $target -Trusted
-    }
-
-    $rows = @(Get-SwisData -SwisConnection $connection -Query $HaQuery)
-
-    if ($rows.Count -eq 0) {
-        throw "The HA query returned no active pool member. Either no HA pool is active, or -HaQuery does not match this Orion version's schema."
-    }
-
-    if ($rows.Count -gt 1) {
-        throw "The HA query returned $($rows.Count) active pool members. Exactly one was expected, so -HaQuery needs narrowing before it can decide anything."
-    }
-
-    $row = $rows[0]
-
-    if ($row.PSObject.Properties.Name -notcontains 'IPAddress') {
-        $columns = ($row.PSObject.Properties.Name) -join ', '
-        throw "The HA query returned no IPAddress column. It returned: $columns. Alias the address column AS IPAddress in -HaQuery."
-    }
-
-    $address = [string]$row.IPAddress
-
-    if ([string]::IsNullOrWhiteSpace($address)) {
-        throw 'The HA query returned an active pool member whose IPAddress is empty.'
-    }
-
-    Write-Log "SolarWinds reports the active HA pool member as $address."
-    return $address
-}
-
-function Get-ActiveServer {
-    # Retries the detection, so one bad moment on the network cannot move a DNS
-    # record on its own. Manual needs no retry: the answer was passed in.
-    [OutputType([string])]
-    param()
-
-    if ($DetectionMethod -eq 'Manual') {
-        if ([string]::IsNullOrWhiteSpace($ActiveServer)) {
-            throw '-DetectionMethod Manual needs -ActiveServer to name the active SolarWinds server.'
-        }
-
-        Write-Log "Using the active server passed in: $ActiveServer."
-        return $ActiveServer
-    }
-
-    for ($attempt = 1; $attempt -le $AttemptCount; $attempt++) {
-        Write-Log "Detecting the active SolarWinds server with the $DetectionMethod method, attempt $attempt of $AttemptCount."
-
-        try {
-            $found = if ($DetectionMethod -eq 'Ha') { Get-ActiveServerFromHa } else { Get-ActiveServerByProbe }
-            if ($found) { return $found }
-        }
-        catch {
-            Write-Log "Attempt $attempt failed: $($_.Exception.Message)" -Level WARN
-        }
-
-        if ($attempt -lt $AttemptCount -and $AttemptDelaySeconds -gt 0) {
-            Start-Sleep -Seconds $AttemptDelaySeconds
-        }
-    }
-
-    return $null
-}
-
 function Get-SolarWindsRecord {
     param(
         [Parameter(Mandatory)][string] $Server
@@ -386,28 +186,22 @@ function Set-SolarWindsRecord {
 }
 
 try {
-    Write-Log "===== Run started, detection method $DetectionMethod ====="
+    Write-Log "===== Run started for active server $ActiveServer ====="
 
-    $activeIp = Get-ActiveServer
-
-    if (-not $activeIp) {
-        Write-Log "The active SolarWinds server could not be determined after $AttemptCount attempt(s). The record is left as it is." -Level ERROR
-        exit 2
-    }
-
-    if ($activeIp -eq $PrimaryDcSolarWindsIp) {
+    # The address is checked against the two servers the script knows rather
+    # than used as given, so a typo in the alert action cannot point the record
+    # at something that was never a SolarWinds server.
+    if ($ActiveServer -eq $PrimaryDcSolarWindsIp) {
         $activeName = 'PrimaryDC'
-        $targetIp = $PrimaryDcTargetIp
     }
-    elseif ($activeIp -eq $SecondaryDcSolarWindsIp) {
+    elseif ($ActiveServer -eq $SecondaryDcSolarWindsIp) {
         $activeName = 'SecondaryDC'
-        $targetIp = $SecondaryDcTargetIp
     }
     else {
-        throw "The active server was found to be $activeIp, which is neither the PrimaryDC SolarWinds server ($PrimaryDcSolarWindsIp) nor the SecondaryDC one ($SecondaryDcSolarWindsIp)."
+        throw "ActiveServer '$ActiveServer' is neither the PrimaryDC SolarWinds server ($PrimaryDcSolarWindsIp) nor the SecondaryDC one ($SecondaryDcSolarWindsIp)."
     }
 
-    Write-Log "$activeName is active, so the record should point at $targetIp."
+    Write-Log "$activeName is active, so the record should point at $ActiveServer."
 
     $dnsServerAddress = if ($DnsServer) { $DnsServer } else { Resolve-DnsServerAddress }
 
@@ -415,21 +209,21 @@ try {
     $currentIp = $record.RecordData.IPv4Address.IPAddressToString
     Write-Log "$RecordName.$ZoneName currently points at $currentIp with a TTL of $($record.TimeToLive)."
 
-    if ($currentIp -eq $targetIp) {
-        Write-Log "Nothing to do, the record already points at the $activeName target ($targetIp)."
+    if ($currentIp -eq $ActiveServer) {
+        Write-Log "Nothing to do, the record already points at the $activeName server ($ActiveServer)."
         exit 0
     }
 
     $target = "$RecordName.$ZoneName on $dnsServerAddress"
-    $action = "Repoint from $currentIp to $targetIp, the $activeName target"
+    $action = "Repoint from $currentIp to $ActiveServer, the $activeName server"
 
     if (-not $PSCmdlet.ShouldProcess($target, $action)) {
-        Write-Log "WhatIf: would have repointed $RecordName.$ZoneName from $currentIp to $targetIp ($activeName target)."
+        Write-Log "WhatIf: would have repointed $RecordName.$ZoneName from $currentIp to $ActiveServer ($activeName server)."
         exit 0
     }
 
-    Set-SolarWindsRecord -Server $dnsServerAddress -TargetIp $targetIp
-    Write-Log "Repointed $RecordName.$ZoneName from $currentIp to $targetIp, the $activeName target."
+    Set-SolarWindsRecord -Server $dnsServerAddress -TargetIp $ActiveServer
+    Write-Log "Repointed $RecordName.$ZoneName from $currentIp to $ActiveServer, the $activeName server."
     exit 0
 }
 catch {

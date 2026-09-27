@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+Docs/fonts/
+Docs/doc.html

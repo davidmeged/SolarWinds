@@ -38,7 +38,7 @@
   <tr><th>קובץ</th><th>שורות</th><th>מקטעים</th><th>איך הוא מחליט</th></tr>
   <tr><td class="mono">DNS.SetSolarWindsRecordToActiveLB.ps1</td><td>{{TOTAL_A}}</td><td>{{BLOCKS_A}}</td><td>תשאול SNMP של ה-Load Balancer על מצב שרתי ה-web. הגרסה המקורית, לא נערכה.</td></tr>
   <tr><td class="mono">DNS.SetSolarWindsRecordToActiveLB.v2.ps1</td><td>{{TOTAL_B}}</td><td>{{BLOCKS_B}}</td><td>אותה החלטה בדיוק, עם טיפול בשגיאות, לוג, ולידציה ו-<code>-WhatIf</code>.</td></tr>
-  <tr><td class="mono">DNS.SetSolarWindsRecordToActiveServer.ps1</td><td>{{TOTAL_C}}</td><td>{{BLOCKS_C}}</td><td>בלי SNMP ובלי שרתי web: מברר איזה שרת SolarWinds פעיל, והרשומה עוקבת אחריו.</td></tr>
+  <tr><td class="mono">DNS.SetSolarWindsRecordToActiveServer.ps1</td><td>{{TOTAL_C}}</td><td>{{BLOCKS_C}}</td><td>בלי SNMP, בלי שרתי web ובלי LB: מקבל מ-SolarWinds את כתובת השרת שהפך לפעיל, והרשומה עוקבת אחריו.</td></tr>
 </table>
 
 <h3>רקע: מה המערכת עושה</h3>
@@ -48,8 +48,8 @@
 <table>
   <tr><th>רכיב</th><th>PrimaryDC</th><th>SecondaryDC</th><th>תפקיד</th></tr>
   <tr><td>שרת SolarWinds</td><td class="mono">10.10.10.1</td><td class="mono">10.10.20.1</td><td>מי שמריץ את הסקריפט. בסקריפט ג' הוא גם יעד ברירת המחדל של הרשומה.</td></tr>
-  <tr><td>Load Balancer — כתובת שירות</td><td class="mono">10.10.10.10</td><td class="mono">10.10.20.10</td><td>היעד שנכתב לרשומת ה-DNS בסקריפטים א' ו-ב'.</td></tr>
-  <tr><td>Load Balancer — כתובת ניהול</td><td class="mono">10.10.10.100</td><td class="mono">10.10.20.100</td><td>הכתובת שנשאלת ב-SNMP. רלוונטית רק לסקריפטים א' ו-ב'.</td></tr>
+  <tr><td>Load Balancer — כתובת שירות</td><td class="mono">10.10.10.10</td><td class="mono">10.10.20.10</td><td>היעד שנכתב לרשומת ה-DNS בסקריפטים א' ו-ב'. בסקריפט ג' אין LB בנתיב, והרשומה מצביעה על שרת ה-SolarWinds עצמו.</td></tr>
+  <tr><td>Load Balancer — כתובת ניהול</td><td class="mono">10.10.10.100</td><td class="mono">10.10.20.100</td><td>הכתובת שנשאלת ב-SNMP. רלוונטית רק לסקריפטים א' ו-ב'; סקריפט ג' אינו נוגע בה.</td></tr>
   <tr><td>רשומת DNS</td><td class="mono" colspan="2">OurSolar.OurZone</td><td>רשומת A יחידה. זו הרשומה שכל הסקריפטים משנים.</td></tr>
 </table>
 
