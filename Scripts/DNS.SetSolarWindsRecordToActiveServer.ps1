@@ -188,6 +188,12 @@ function Set-SolarWindsRecord {
 try {
     Write-Log "===== Run started for active server $ActiveServer ====="
 
+    # A SolarWinds alert action fills this in from a macro, and a macro can
+    # hand over its value padded with whitespace. Trimming here means a stray
+    # space cannot stop a failover; without it the address matches neither
+    # server and the run fails for no good reason.
+    $ActiveServer = $ActiveServer.Trim()
+
     # The address is checked against the two servers the script knows rather
     # than used as given, so a typo in the alert action cannot point the record
     # at something that was never a SolarWinds server.
