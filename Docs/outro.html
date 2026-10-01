@@ -10,7 +10,7 @@
   <tr><td>‏LB לא זמין</td><td>הסקריפט קורס, אין failover</td><td>החלטה לפי <code>-SnmpFailureMode</code></td><td>לא רלוונטי — אין LB</td></tr>
   <tr><td>חוסר ידיעה</td><td>נראה כמו נפילה</td><td>מצב <code>Unknown</code> נפרד</td><td>לא קיים — התשובה מגיעה מבחוץ</td></tr>
   <tr><td>הגנת flapping</td><td>אין</td><td><code>-PollCount</code></td><td>לא נדרשת — אין תשאול</td></tr>
-  <tr><td>לוג</td><td><code>Write-Host aaaaa</code></td><td>קובץ עם חותמות זמן</td><td>קובץ נפרד משלו</td></tr>
+  <tr><td>לוג</td><td><code>Write-Host aaaaa</code></td><td>קובץ עם חותמות זמן</td><td>קובץ נפרד, עם רוטציה</td></tr>
   <tr><td>ולידציה</td><td>אין</td><td><code>param()</code> מלא</td><td><code>param()</code> מלא</td></tr>
   <tr><td>הנחות לא מאומתות</td><td>הערך <code>0</code></td><td>הערך <code>0</code></td><td>אין</td></tr>
   <tr><td>‏<code>-WhatIf</code></td><td>אין</td><td>יש</td><td>יש</td></tr>
@@ -35,7 +35,7 @@
 <table>
   <tr><th>סקריפט</th><th>תרחישים</th><th>מה נבדק</th></tr>
   <tr><td>ב' — מתוקן</td><td>17, כולם עוברים</td><td>failover לשני הכיוונים, שרת בודד למעלה, רשומה כבר נכונה, כשל SNMP בשני המצבים, רשומות כפולות, היעדר רשומה, ערך לא תקין, <code>-WhatIf</code>, ולידציות</td></tr>
-  <tr><td>ג' — בלי Alteon</td><td>16, כולם עוברים</td><td>שני הכיוונים, רשומה כבר נכונה, ארגומנט מיקומי כמו <code>$args[0]</code>, כתובת לא מוכרת, רשומות כפולות, היעדר רשומה, TTL, שרת DNS מפורש, <code>-WhatIf</code>, ולידציות, ודחיית הפרמטרים שהוסרו</td></tr>
+  <tr><td>ג' — בלי Alteon</td><td>25, כולם עוברים</td><td>שני הכיוונים, רשומה כבר נכונה, ארגומנט מיקומי כמו <code>$args[0]</code>, כתובת לא מוכרת, רשומות כפולות, היעדר רשומה, TTL, שרת DNS מפורש, <code>-WhatIf</code>, ערכים מרופדים כפי שמאקרו מחזיר, רוטציית לוג ושרשרת הדורות, נתיב לוג בלתי כתיב, ולידציות, ודחיית הפרמטרים שהוסרו</td></tr>
 </table>
 
 <div class="note">

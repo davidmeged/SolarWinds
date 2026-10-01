@@ -32,6 +32,15 @@
     a writable copy of the zone. When it is left out the script walks the DNS
     servers configured on this host and takes the first one that answers a ping.
 
+.PARAMETER LogMaxBytes
+    The size at which the log is rotated. Rotation keeps LogKeep older
+    generations beside it, so the space the logging can occupy is bounded at
+    roughly LogMaxBytes times LogKeep plus one.
+
+.PARAMETER LogKeep
+    How many rotated logs to keep. Zero keeps none: the log starts over
+    instead.
+
 .PARAMETER RecordTtlSeconds
     When greater than zero, the TTL written onto the record. A failover only
     takes effect once the old TTL has expired everywhere, so a low value (30-60)
@@ -85,11 +94,52 @@ param(
     [ValidateRange(0, 86400)]
     [int] $RecordTtlSeconds = 0,
 
-    [string] $LogPath = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\dns-active-server.log')
+    [string] $LogPath = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\dns-active-server.log'),
+
+    [ValidateRange(4KB, 100MB)]
+    [int] $LogMaxBytes = 1MB,
+
+    [ValidateRange(0, 20)]
+    [int] $LogKeep = 3
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Invoke-LogRotation {
+    # Renames the log out of the way once it reaches -LogMaxBytes, keeping
+    # -LogKeep older generations: .log -> .log.1, .log.1 -> .log.2, and so on,
+    # with the oldest dropped. Run on a schedule the log would otherwise grow
+    # without bound.
+    param(
+        [Parameter(Mandatory)][string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ((Get-Item -LiteralPath $Path).Length -lt $script:LogMaxBytes) { return }
+
+    # Nothing to keep: the log simply starts over.
+    if ($script:LogKeep -lt 1) {
+        Remove-Item -LiteralPath $Path -Force -WhatIf:$false -Confirm:$false
+        return
+    }
+
+    # Oldest generation falls off the end.
+    $oldest = "$Path.$($script:LogKeep)"
+    if (Test-Path -LiteralPath $oldest) {
+        Remove-Item -LiteralPath $oldest -Force -WhatIf:$false -Confirm:$false
+    }
+
+    # Shift the rest down, highest first so nothing is overwritten on the way.
+    for ($i = $script:LogKeep - 1; $i -ge 1; $i--) {
+        $from = "$Path.$i"
+        if (Test-Path -LiteralPath $from) {
+            Move-Item -LiteralPath $from -Destination "$Path.$($i + 1)" -Force -WhatIf:$false -Confirm:$false
+        }
+    }
+
+    Move-Item -LiteralPath $Path -Destination "$Path.1" -Force -WhatIf:$false -Confirm:$false
+}
 
 function Write-Log {
     param(
@@ -111,6 +161,7 @@ function Write-Log {
         if ($directory -and -not (Test-Path -LiteralPath $directory)) {
             New-Item -Path $directory -ItemType Directory -Force -WhatIf:$false -Confirm:$false | Out-Null
         }
+        Invoke-LogRotation -Path $script:LogPath
         Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -WhatIf:$false -Confirm:$false
     }
     catch {
