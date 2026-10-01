@@ -47,3 +47,19 @@ at any range left inconsistent.
 ## Fonts
 
 `fonts/` is not checked in — the rebuild steps above recreate it.
+
+# Code listings
+
+`gen_code_pdf.py` renders each script as its own printable PDF next to it in
+`Scripts/`, named after the script, the way `Redact-FileContent.pdf` and
+`Search-FilesForWord.pdf` already are. Listings carry line numbers, so one can
+be read alongside `DNS-Failover-Explained.pdf`, which refers to the code by
+line range.
+
+```
+python gen_code_pdf.py                                  # all of them
+python gen_code_pdf.py DNS.SetSolarWindsRecordToActiveServer.ps1   # just one
+```
+
+The code is read from the `.ps1` files at build time, so a listing cannot drift
+from the script it documents. Rebuild after editing a script.
