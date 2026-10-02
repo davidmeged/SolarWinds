@@ -1,11 +1,15 @@
-# This sample script demonstrates how to authenticate against the Cisco Secure
-# Firewall Management Center (FMC) REST API and retrieve the device records
-# (the managed FTD devices) of the Global domain, together with the management
-# address of each one. This is useful for feeding the managed firewalls into
-# SolarWinds for monitoring - see Orchestrator.AddFmcDevicesToSolarWinds.ps1.
+# This sample script reads the managed devices (FTD) of the Cisco Secure
+# Firewall Management Center (FMC) Global domain through the FMC REST API and
+# adds every device that is not already monitored as a SolarWinds node with
+# the default pollers (Status, Response Time, Details, Uptime), in one run.
 #
-# Please update the FMC server details and credential setup in the example
-# usage at the bottom to match your environment.
+# FMC registers a device by its management address, which may be an IP
+# address or a DNS name. A DNS name is resolved to its first IPv4 address,
+# because SolarWinds nodes are added by IP address.
+#
+# The devices must have SNMP enabled (FMC: Devices > Platform Settings > SNMP)
+# with the community passed in -SNMPCommunity, or the Details/Uptime pollers
+# will have nothing to poll.
 #
 # FMC API notes:
 #   - generatetoken takes HTTP Basic auth and returns the access token, the
@@ -18,6 +22,23 @@
 # Requires PowerShell 7+ for the -SkipCertificateCheck switch on
 # Invoke-RestMethod / Invoke-WebRequest. If you are on Windows PowerShell 5.1,
 # drop -TrustAllCertificates and install a trusted certificate on the FMC.
+#
+# Please update the connection details/credentials for both systems below.
+
+param(
+    # --- Cisco FMC connection ---
+    [string]$FmcServer = "1.1.1.1",
+    [string]$FmcCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\FMC_Credential.xml",
+
+    # --- SolarWinds connection ---
+    [string]$SwisHost = "5.5.5.5",
+    [string]$SwisCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\SolarWindsCredentials.xml",
+
+    # SNMP community configured on the FTD devices.
+    [string]$SNMPCommunity = "public"
+)
+
+# --- FMC functions ---
 
 function Get-FmcHeaderValue {
     param(
@@ -205,19 +226,155 @@ function Get-FmcDeviceRecords {
     $results
 }
 
-# ---------------------------------------------------------------------------
-# Example usage
-# ---------------------------------------------------------------------------
+# --- SolarWinds functions ---
 
-# $fmcServer = "fmc.example.com"
-# $fmcCred   = Import-Clixml -Path "D:\SolarWindsScripts\PowerShell\Credentials\FMC_Credential.xml"
-#
-# $session = Connect-Fmc -Server $fmcServer -Credential $fmcCred -TrustAllCertificates
-#
-# try {
-#     $devices = Get-FmcDeviceRecords -Session $session
-#     $devices | Format-Table -AutoSize
-# }
-# finally {
-#     Disconnect-Fmc -Session $session
-# }
+function Resolve-ManagementAddress {
+    param(
+        [string]$HostName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HostName)) {
+        return $null
+    }
+
+    $HostName = $HostName.Trim()
+    $address  = $null
+    if ([System.Net.IPAddress]::TryParse($HostName, [ref]$address)) {
+        return $address.ToString()
+    }
+
+    try {
+        $ipv4 = [System.Net.Dns]::GetHostAddresses($HostName) |
+            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+            Select-Object -First 1
+        if ($ipv4) {
+            return $ipv4.ToString()
+        }
+    }
+    catch {
+        Write-Warning "Could not resolve '$HostName': $($_.Exception.Message)"
+    }
+
+    $null
+}
+
+function Add-SwisNode {
+    param(
+        [Parameter(Mandatory = $true)] $Swis,
+        [Parameter(Mandatory = $true)] [string]$IPAddress,
+        [string]$Name = "",
+        [string]$Community = "public"
+    )
+
+    $newNodeProps = @{
+        IPAddress     = $IPAddress
+        EngineID      = 1
+        Caption       = $Name
+
+        # SNMP v2 specific
+        ObjectSubType = "SNMP"
+        SNMPVersion   = 2
+        Community     = $Community
+
+        DNS           = ""
+        SysName       = ""
+    }
+
+    $newNodeUri = New-SwisObject $Swis -EntityType "Orion.Nodes" -Properties $newNodeProps
+    $nodeProps  = Get-SwisObject $Swis -Uri $newNodeUri
+
+    # Register the standard set of pollers for the node
+    $poller = @{
+        NetObject     = "N:" + $nodeProps["NodeID"]
+        NetObjectType = "N"
+        NetObjectID   = $nodeProps["NodeID"]
+    }
+
+    foreach ($pollerType in @(
+        "N.Status.ICMP.Native",
+        "N.ResponseTime.ICMP.Native",
+        "N.Details.SNMP.Generic",
+        "N.Uptime.SNMP.Generic"
+    )) {
+        $poller["PollerType"] = $pollerType
+        New-SwisObject $Swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
+    }
+
+    $nodeProps
+}
+
+# --- Read the managed devices from FMC ---
+try {
+    $fmcCred    = Import-Clixml -Path $FmcCredentialPath
+    $fmcSession = Connect-Fmc -Server $FmcServer -Credential $fmcCred -TrustAllCertificates
+}
+catch {
+    Write-Error "Failed to authenticate with FMC: $($_.Exception.Message)"
+    return
+}
+
+try {
+    $devices = Get-FmcDeviceRecords -Session $fmcSession
+}
+catch {
+    Write-Error "Failed to retrieve devices from FMC: $($_.Exception.Message)"
+    return
+}
+finally {
+    try {
+        Disconnect-Fmc -Session $fmcSession
+    }
+    catch {
+        Write-Warning "Failed to revoke the FMC access token: $($_.Exception.Message)"
+    }
+}
+
+if (-not $devices) {
+    Write-Warning "FMC returned no devices - nothing to add."
+    return
+}
+
+# --- Add the devices to SolarWinds ---
+try {
+    $swisCred = Import-Clixml -Path $SwisCredentialPath
+    $swis     = Connect-Swis -Hostname $SwisHost -Credential $swisCred
+    Write-Host "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
+}
+catch {
+    Write-Error "Failed to connect to SWIS: $($_.Exception.Message)"
+    return
+}
+
+try {
+    foreach ($device in $devices) {
+        $ip = Resolve-ManagementAddress -HostName $device.HostName
+        if (-not $ip) {
+            Write-Warning "Skipping '$($device.Name)' - no usable management address ('$($device.HostName)')."
+            continue
+        }
+
+        Write-Host "Processing '$($device.Name)' ($ip)..."
+
+        try {
+            $existing = Get-SwisData -SwisConnection $swis -Query "SELECT NodeID FROM Orion.Nodes WHERE IPAddress = @ip" -Parameters @{ ip = $ip }
+
+            if ($existing) {
+                Write-Host " Node already exists [NodeID $(@($existing)[0])], skipping add." -ForegroundColor DarkBlue
+                continue
+            }
+
+            $nodeProps = Add-SwisNode -Swis $swis -Name $device.Name -IPAddress $ip -Community $SNMPCommunity
+            Write-Host " Added node [NodeID $($nodeProps["NodeID"])]." -ForegroundColor Green
+        }
+        catch {
+            Write-Host " Failed to process '$($device.Name)' ($ip): $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+finally {
+    # Connect-Swis returns an InfoServiceProxy, which is IDisposable, so close
+    # it explicitly instead of leaving it to the finalizer.
+    $swis.Close()
+}
+
+Write-Host "Script completed."
