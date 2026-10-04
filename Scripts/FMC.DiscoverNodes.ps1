@@ -1,29 +1,79 @@
-# This sample script reads the managed devices (FTD) of the Cisco Secure
-# Firewall Management Center (FMC) Global domain through the FMC REST API and
-# adds every device that is not already monitored as a SolarWinds node with
-# the default pollers (Status, Response Time, Details, Uptime), in one run.
-#
-# FMC registers a device by its management address, which may be an IP
-# address or a DNS name. A DNS name is resolved to its first IPv4 address,
-# because SolarWinds nodes are added by IP address.
-#
-# The devices must have SNMP enabled (FMC: Devices > Platform Settings > SNMP)
-# with the community passed in -SNMPCommunity, or the Details/Uptime pollers
-# will have nothing to poll.
-#
-# FMC API notes:
-#   - generatetoken takes HTTP Basic auth and returns the access token, the
-#     refresh token and the Global domain UUID as response headers (no body).
-#   - An access token is valid for 30 minutes and can be refreshed up to 3
-#     times with the refresh token.
-#   - The API is rate limited to 120 requests per minute; past that FMC
-#     answers 429 Too Many Requests.
-#
-# Requires PowerShell 7+ for the -SkipCertificateCheck switch on
-# Invoke-RestMethod / Invoke-WebRequest. If you are on Windows PowerShell 5.1,
-# drop -TrustAllCertificates and install a trusted certificate on the FMC.
-#
-# Please update the connection details/credentials for both systems below.
+<#
+.SYNOPSIS
+    SolarWinds SWIS PowerShell script  add the devices managed by Cisco FMC as nodes
+
+.DESCRIPTION
+    This script combines the Cisco Secure Firewall Management Center (FMC)
+    REST API with a building block from the SolarWinds SDK samples:
+
+    o FMC REST API
+        - authenticates with auth/generatetoken and reads the device records
+          (the managed FTD devices) of the Global domain, page by page.
+
+    o CRUD.AddNode.ps1
+        - adds a node <component> using CRUD operations (New-SwisObject) and
+          registers the standard set of pollers for it (Status, Response
+          Time, Details, Uptime).
+
+    The result is a single script that walks the devices FMC reports and
+    adds every one of them that does not already exist in SolarWinds.
+
+    FMC registers a device by its management address, which may be an IP
+    address or a DNS name. A DNS name is resolved to its first IPv4 address,
+    because SolarWinds nodes are added by IP address. A device whose address
+    cannot be resolved is skipped with a warning.
+
+    FMC API notes:
+      - generatetoken takes HTTP Basic auth and returns the access token, the
+        refresh token and the Global domain UUID as response headers (no body).
+      - An access token is valid for 30 minutes and can be refreshed up to 3
+        times with the refresh token; the script refreshes it on a 401.
+      - The API is rate limited to 120 requests per minute; on a 429 the
+        script waits and retries.
+      - The token is revoked (auth/revokeaccess) once the devices are read.
+
+    Please update the parameter defaults below to match your environment
+    before running.
+
+.PARAMETER FmcServer
+    Address of the FMC (IP or DNS name, optionally with :port).
+
+.PARAMETER FmcCredentialPath
+    Path to a PSCredential exported with Export-Clixml for a FMC user with
+    REST API access. Create it once, as the account that runs the script:
+        Get-Credential | Export-Clixml -Path <path>
+
+.PARAMETER SwisHost
+    Address of the SolarWinds server (SWIS).
+
+.PARAMETER SwisCredentialPath
+    Path to a PSCredential exported with Export-Clixml for a SolarWinds user
+    that can add nodes.
+
+.PARAMETER EngineID
+    SolarWinds polling engine the new nodes are assigned to.
+
+.PARAMETER SNMPVersion
+    SNMP version used to poll the new nodes.
+
+.PARAMETER SNMPCommunity
+    SNMP community configured on the FTD devices (FMC: Devices > Platform
+    Settings > SNMP). Without it the Details/Uptime pollers have nothing to
+    poll.
+
+.EXAMPLE
+    .\FMC.DiscoverNodes.ps1
+
+    Runs with the defaults set in the param block.
+
+.EXAMPLE
+    .\FMC.DiscoverNodes.ps1 -FmcServer fmc.example.com -SwisHost orion.example.com -SNMPCommunity "mycommunity"
+
+.NOTES
+    Requires PowerShell 7+ for the -SkipCertificateCheck switch on
+    Invoke-RestMethod / Invoke-WebRequest, and the SwisPowerShell module for
+    Connect-Swis.
+#>
 
 param(
     # --- Cisco FMC connection ---
@@ -34,12 +84,13 @@ param(
     [string]$SwisHost = "5.5.5.5",
     [string]$SwisCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\SolarWindsCredentials.xml",
 
-    # SNMP community configured on the FTD devices.
-    [string]$SNMPCommunity = "public"
+    # Shared settings applied to every device retrieved from FMC.
+    [int]$EngineID = 2,
+    [int]$SNMPVersion = 2,
+    [string]$SNMPCommunity = ''
 )
 
-# --- FMC functions ---
-
+# --- Function: Read a header from a FMC response ---
 function Get-FmcHeaderValue {
     param(
         [Parameter(Mandatory = $true)] $Headers,
@@ -56,6 +107,7 @@ function Get-FmcHeaderValue {
     $value
 }
 
+# --- Function: Connect to FMC (generate token) ---
 function Connect-Fmc {
     param(
         [Parameter(Mandatory = $true)] [string]$Server,
@@ -89,6 +141,7 @@ function Connect-Fmc {
     }
 }
 
+# --- Function: Refresh the FMC access token ---
 function Update-FmcToken {
     param(
         [Parameter(Mandatory = $true)] [pscustomobject]$Session
@@ -117,6 +170,7 @@ function Update-FmcToken {
     $Session.RefreshCount++
 }
 
+# --- Function: Disconnect from FMC (revoke token) ---
 function Disconnect-Fmc {
     param(
         [Parameter(Mandatory = $true)] [pscustomobject]$Session
@@ -134,6 +188,7 @@ function Disconnect-Fmc {
     Invoke-WebRequest @params | Out-Null
 }
 
+# --- Function: Call the FMC config API ---
 function Invoke-FmcApi {
     param(
         [Parameter(Mandatory = $true)] [pscustomobject]$Session,
@@ -193,6 +248,7 @@ function Invoke-FmcApi {
     }
 }
 
+# --- Function: Get all device records from FMC (paginated) ---
 function Get-FmcDeviceRecords {
     param(
         [Parameter(Mandatory = $true)] [pscustomobject]$Session
@@ -226,8 +282,7 @@ function Get-FmcDeviceRecords {
     $results
 }
 
-# --- SolarWinds functions ---
-
+# --- Function: Resolve a management address to an IPv4 address ---
 function Resolve-ManagementAddress {
     param(
         [string]$HostName
@@ -258,22 +313,25 @@ function Resolve-ManagementAddress {
     $null
 }
 
+# --- Function: Add a Node [Component] ---
 function Add-SwisNode {
     param(
         [Parameter(Mandatory = $true)] $Swis,
         [Parameter(Mandatory = $true)] [string]$IPAddress,
         [string]$Name = "",
-        [string]$Community = "public"
+        [int]$EngineID = 2,
+        [int]$SNMPVersion = 2,
+        [string]$Community = ""
     )
 
     $newNodeProps = @{
         IPAddress     = $IPAddress
-        EngineID      = 1
+        EngineID      = $EngineID
         Caption       = $Name
 
         # SNMP v2 specific
         ObjectSubType = "SNMP"
-        SNMPVersion   = 2
+        SNMPVersion   = $SNMPVersion
         Community     = $Community
 
         DNS           = ""
@@ -334,7 +392,7 @@ if (-not $devices) {
     return
 }
 
-# --- Add the devices to SolarWinds ---
+# --- Connect to SWIS ---
 try {
     $swisCred = Import-Clixml -Path $SwisCredentialPath
     $swis     = Connect-Swis -Hostname $SwisHost -Credential $swisCred
@@ -345,6 +403,7 @@ catch {
     return
 }
 
+# --- Main Loop: Process each device ---
 try {
     foreach ($device in $devices) {
         $ip = Resolve-ManagementAddress -HostName $device.HostName
@@ -363,7 +422,7 @@ try {
                 continue
             }
 
-            $nodeProps = Add-SwisNode -Swis $swis -Name $device.Name -IPAddress $ip -Community $SNMPCommunity
+            $nodeProps = Add-SwisNode -Swis $swis -Name $device.Name -IPAddress $ip -EngineID $EngineID -SNMPVersion $SNMPVersion -Community $SNMPCommunity
             Write-Host " Added node [NodeID $($nodeProps["NodeID"])]." -ForegroundColor Green
         }
         catch {
