@@ -284,7 +284,15 @@ function Get-FmcDeviceRecords {
 
 # --- Function: Resolve a management address to an IPv4 address ---
 function Resolve-ManagementAddress {
-    param(
+    <#
+    .SYNOPSIS
+        Turn the management address FMC reports into an IPv4 address
+    .PARAMETER HostName
+        The device's hostName from FMC - an IP address or a DNS name
+    .OUTPUTS
+        IPv4 address text, or $null when the name cannot be resolved
+    #>
+    param (
         [string]$HostName
     )
 
@@ -305,41 +313,134 @@ function Resolve-ManagementAddress {
         if ($ipv4) {
             return $ipv4.ToString()
         }
-    }
-    catch {
+    } catch {
         Write-Warning "Could not resolve '$HostName': $($_.Exception.Message)"
     }
 
-    $null
+    return $null
+}
+
+# --- Function: End the FMC and SWIS sessions ---
+function Stop-Sessions {
+    <#
+    .SYNOPSIS
+        End the FMC and SWIS sessions opened by this script
+    .DESCRIPTION
+        FMC publishes a revocation endpoint (auth/revokeaccess), so the
+        access token is revoked rather than left to expire after 30 minutes.
+
+        SWIS has no Disconnect-Swis cmdlet, but Connect-Swis returns an
+        InfoServiceProxy, which is IDisposable, so the connection can be
+        closed explicitly instead of being left to the finalizer.
+
+        Safe to call more than once - each session is ended only once.
+    #>
+    if ($script:fmcSession) {
+        try {
+            Disconnect-Fmc -Session $script:fmcSession
+            Write-Host "Revoked the FMC API token." -ForegroundColor Green
+        } catch {
+            Write-Warning "Failed to revoke the FMC API token: $($_.Exception.Message)"
+        }
+        $script:fmcSession = $null
+    }
+
+    if ($script:swis) {
+        try {
+            $script:swis.Close()
+            Write-Host "Closed the SWIS connection." -ForegroundColor Green
+        } catch {
+            Write-Warning "Failed to close the SWIS connection: $($_.Exception.Message)"
+        }
+        $script:swis = $null
+    }
+}
+
+# Call function "Connect-Fmc"
+try {
+    $fmcCredentials = Import-Clixml -Path $FmcCredentialPath
+    $fmcSession     = Connect-Fmc -Server $FmcServer -Credential $fmcCredentials -TrustAllCertificates
+} catch {
+    Write-Error "Failed to authenticate with FMC: $($_.Exception.Message)"
+    Stop-Sessions
+    exit
+}
+
+# Call function "Get-FmcDeviceRecords"
+try {
+    $results = Get-FmcDeviceRecords -Session $fmcSession
+} catch {
+    Write-Error "Failed to retrieve devices from FMC: $($_.Exception.Message)"
+    Stop-Sessions
+    exit
+}
+
+# The device list is all that is needed from FMC, so revoke the token now
+# instead of letting it run out (30 minutes) while the nodes are added.
+Stop-Sessions
+
+if (-not $results) {
+    Write-Warning "FMC returned no devices - nothing to process."
+    exit
+}
+
+try {
+    $swisCredentials = Import-Clixml -Path $SwisCredentialPath
+    $swis = Connect-Swis -Hostname $SwisHost -Credential $swisCredentials
+    Write-Host "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
+} catch {
+    Write-Error "Failed to connect to SWIS: $($_.Exception.Message)"
+    Stop-Sessions
+    exit
+}
+
+# --- Build the list of components to process ---
+# Build $components from the devices returned by FMC: the management address
+# is resolved to an IPv4 address and the FMC device name is kept as the node
+# caption. A device without a usable address is skipped with a warning.
+$components = foreach ($device in $results) {
+    $ip = Resolve-ManagementAddress -HostName $device.HostName
+
+    if (-not $ip) {
+        Write-Warning "Skipping '$($device.Name)' - no usable management address ('$($device.HostName)')."
+        continue
+    }
+
+    @{
+        IPAddress   = $ip
+        Caption     = $device.Name
+        EngineID    = $EngineID
+        SNMPVersion = $SNMPVersion
+        DNS         = ""
+        SysName     = ""
+        Community   = $SNMPCommunity
+    }
 }
 
 # --- Function: Add a Node [Component] ---
-function Add-SwisNode {
-    param(
-        [Parameter(Mandatory = $true)] $Swis,
-        [Parameter(Mandatory = $true)] [string]$IPAddress,
-        [string]$Name = "",
-        [int]$EngineID = 2,
-        [int]$SNMPVersion = 2,
-        [string]$Community = ""
-    )
+function Add-Component {
+    param($component)
 
     $newNodeProps = @{
-        IPAddress     = $IPAddress
-        EngineID      = $EngineID
-        Caption       = $Name
-
+        IPAddress       = $component.IPAddress
+        EngineID        = $component.EngineID
+        Caption         = $component.Caption
         # SNMP v2 specific
-        ObjectSubType = "SNMP"
-        SNMPVersion   = $SNMPVersion
-        Community     = $Community
-
-        DNS           = ""
-        SysName       = ""
+        ObjectSubType   = "SNMP"
+        SNMPVersion     = $component.SNMPVersion
+        DNS             = $component.DNS
+        SysName         = $component.SysName
+        Community       = $component.Community
+        # === default values ===
+        # EntityType    = 'Orion.Nodes'
+        # DynamicIP     = $false
+        # PollInterval  = 120
+        # RediscoveryInterval = 30
+        # StatCollection    = 10
     }
 
-    $newNodeUri = New-SwisObject $Swis -EntityType "Orion.Nodes" -Properties $newNodeProps
-    $nodeProps  = Get-SwisObject $Swis -Uri $newNodeUri
+    $newNodeUri = New-SwisObject -SwisConnection $swis -EntityType "Orion.Nodes" -Properties $newNodeProps
+    $nodeProps  = Get-SwisObject -SwisConnection $swis -Uri $newNodeUri
 
     # Register the standard set of pollers for the node
     $poller = @{
@@ -355,85 +456,35 @@ function Add-SwisNode {
         "N.Uptime.SNMP.Generic"
     )) {
         $poller["PollerType"] = $pollerType
-        New-SwisObject $Swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
+        New-SwisObject -SwisConnection $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
     }
 
-    $nodeProps
+    return $nodeProps["NodeID"]
 }
 
-# --- Read the managed devices from FMC ---
-try {
-    $fmcCred    = Import-Clixml -Path $FmcCredentialPath
-    $fmcSession = Connect-Fmc -Server $FmcServer -Credential $fmcCred -TrustAllCertificates
-}
-catch {
-    Write-Error "Failed to authenticate with FMC: $($_.Exception.Message)"
-    return
-}
+# --- Main Loop: Process each component ---
+foreach ($component in $components) {
+    Write-Host "Processing component $($component.Caption) ($($component.IPAddress))..."
 
-try {
-    $devices = Get-FmcDeviceRecords -Session $fmcSession
-}
-catch {
-    Write-Error "Failed to retrieve devices from FMC: $($_.Exception.Message)"
-    return
-}
-finally {
     try {
-        Disconnect-Fmc -Session $fmcSession
-    }
-    catch {
-        Write-Warning "Failed to revoke the FMC access token: $($_.Exception.Message)"
-    }
-}
+        # Check if node already exists
+        $existing = Get-SwisData -SwisConnection $swis -Query "SELECT NodeID FROM Orion.Nodes WHERE IPAddress = @ip" -Parameters @{ ip = $component.IPAddress }
 
-if (-not $devices) {
-    Write-Warning "FMC returned no devices - nothing to add."
-    return
-}
-
-# --- Connect to SWIS ---
-try {
-    $swisCred = Import-Clixml -Path $SwisCredentialPath
-    $swis     = Connect-Swis -Hostname $SwisHost -Credential $swisCred
-    Write-Host "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to connect to SWIS: $($_.Exception.Message)"
-    return
-}
-
-# --- Main Loop: Process each device ---
-try {
-    foreach ($device in $devices) {
-        $ip = Resolve-ManagementAddress -HostName $device.HostName
-        if (-not $ip) {
-            Write-Warning "Skipping '$($device.Name)' - no usable management address ('$($device.HostName)')."
-            continue
+        if ($existing) {
+            $nodeId = @($existing)[0]
+            Write-Host " Node already exists {NodeID $nodeId}, skipping add." -ForegroundColor DarkBlue
+        }
+        else {
+            $nodeId = Add-Component $component
+            Write-Host " Added node [NodeID $nodeId]." -ForegroundColor Green
         }
 
-        Write-Host "Processing '$($device.Name)' ($ip)..."
-
-        try {
-            $existing = Get-SwisData -SwisConnection $swis -Query "SELECT NodeID FROM Orion.Nodes WHERE IPAddress = @ip" -Parameters @{ ip = $ip }
-
-            if ($existing) {
-                Write-Host " Node already exists [NodeID $(@($existing)[0])], skipping add." -ForegroundColor DarkBlue
-                continue
-            }
-
-            $nodeProps = Add-SwisNode -Swis $swis -Name $device.Name -IPAddress $ip -EngineID $EngineID -SNMPVersion $SNMPVersion -Community $SNMPCommunity
-            Write-Host " Added node [NodeID $($nodeProps["NodeID"])]." -ForegroundColor Green
-        }
-        catch {
-            Write-Host " Failed to process '$($device.Name)' ($ip): $($_.Exception.Message)" -ForegroundColor Red
-        }
+    } catch {
+        Write-Host " Failed to process $($component.IPAddress): $($_.Exception.Message)" -ForegroundColor Red
     }
 }
-finally {
-    # Connect-Swis returns an InfoServiceProxy, which is IDisposable, so close
-    # it explicitly instead of leaving it to the finalizer.
-    $swis.Close()
-}
+
+# --- End the FMC and SWIS sessions ---
+Stop-Sessions
 
 Write-Host "Script completed."
