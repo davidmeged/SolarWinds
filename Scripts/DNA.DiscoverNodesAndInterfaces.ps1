@@ -23,14 +23,163 @@
     The list of components (nodes) is retrieved automatically from the
     Cisco DNA Center inventory: every device the DNA API reports is added
     by its management IP address.
+
+    Every run writes a timestamped log file under -LogDirectory recording
+    each component that was added or already existed, every interface that
+    was added, and every poller that was registered. Log files older than
+    -LogRetentionDays are deleted at the start of each run.
 #>
 
 param(
     # Shared settings applied to every device retrieved from DNA.
     [int]$EngineID = 2,
     [int]$SNMPVersion = 2,
-    [string]$SNMPCommunity = ''
+    [string]$SNMPCommunity = '',
+
+    # Where each run's log is written, and how long older logs are kept.
+    # A retention of 0 or less keeps every log file.
+    [string]$LogDirectory = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\DNA.DiscoverNodesAndInterfaces'),
+
+    [ValidateRange(0, 3650)]
+    [int]$LogRetentionDays = 30
 )
+
+# --- Logging ---
+# Mirrors the Write-Log convention of DNS.SetSolarWindsRecordToActiveServer.ps1
+# (same level set, same line format, same UTF8 Add-Content), but keeps a file
+# per run and prunes by age, because this script is the kind of scheduled job
+# whose per-run record is what you go back to read.
+$script:logFile = $null
+$script:stats   = [ordered]@{
+    ComponentsAdded    = 0
+    ComponentsExisting = 0
+    ComponentsFailed   = 0
+    InterfacesAdded    = 0
+    PollersAdded       = 0
+}
+
+function Write-Log {
+    <#
+    .SYNOPSIS
+        Record one line in the run log, and on the console unless suppressed
+    .PARAMETER Message
+        The text to record.
+    .PARAMETER Level
+        INFO, WARN or ERROR. The level also picks the console stream, so
+        warnings and errors still reach the host's warning and error streams.
+    .PARAMETER ForegroundColor
+        Console colour for an INFO line; ignored for the other levels.
+    .PARAMETER NoConsole
+        Write to the log file only. Used for the per-item detail lines - every
+        component, interface and poller - which belong in the record but would
+        bury the console summary.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Message,
+
+        [ValidateSet('INFO', 'WARN', 'ERROR')]
+        [string] $Level = 'INFO',
+
+        [string] $ForegroundColor,
+
+        [switch] $NoConsole
+    )
+
+    if (-not $NoConsole) {
+        switch ($Level) {
+            'WARN'  { Write-Warning $Message }
+            'ERROR' { Write-Error   $Message }
+            default {
+                if ($ForegroundColor) { Write-Host $Message -ForegroundColor $ForegroundColor }
+                else                  { Write-Host $Message }
+            }
+        }
+    }
+
+    if (-not $script:logFile) { return }
+
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [{1,-5}] {2}' -f (Get-Date), $Level, $Message
+    try {
+        Add-Content -LiteralPath $script:logFile -Value $line -Encoding UTF8
+    } catch {
+        # A logging failure must not take the run down, and must not recurse
+        # back into Write-Log. Drop the path so this warns once, not per line.
+        Write-Warning "Could not write to the log file '$script:logFile': $($_.Exception.Message)"
+        $script:logFile = $null
+    }
+}
+
+function Initialize-Log {
+    <#
+    .SYNOPSIS
+        Create the log directory and open this run's log file
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Directory
+    )
+
+    if (-not (Test-Path -LiteralPath $Directory)) {
+        New-Item -Path $Directory -ItemType Directory -Force | Out-Null
+    }
+
+    $name = 'DNA.DiscoverNodesAndInterfaces_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date)
+    $script:logFile = Join-Path -Path $Directory -ChildPath $name
+
+    Write-Host "Logging to $($script:logFile)." -ForegroundColor Green
+    Write-Log "=== Run started ===" -NoConsole
+}
+
+function Remove-OldLog {
+    <#
+    .SYNOPSIS
+        Delete this script's own log files older than the retention period
+    .DESCRIPTION
+        Only files matching this script's own log name pattern are considered,
+        so nothing else that happens to sit in the log directory is touched,
+        and the current run's file is excluded by name as well as by age. A
+        retention of 0 or less disables the purge and keeps every log.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Directory,
+        [Parameter(Mandatory)][int]    $Days
+    )
+
+    if ($Days -le 0) {
+        Write-Log "Log retention disabled (LogRetentionDays = $Days); keeping every log file." -NoConsole
+        return
+    }
+
+    $cutoff  = (Get-Date).AddDays(-$Days)
+    $current = Split-Path -Path $script:logFile -Leaf
+
+    try {
+        $old = @(Get-ChildItem -LiteralPath $Directory -Filter 'DNA.DiscoverNodesAndInterfaces_*.log' -File -ErrorAction Stop |
+            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.Name -ne $current })
+    } catch {
+        Write-Log "Could not list the log directory '$Directory': $($_.Exception.Message)" -Level WARN
+        return
+    }
+
+    $deleted = 0
+    foreach ($file in $old) {
+        try {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+            Write-Log "Deleted old log: $($file.Name) (last written $($file.LastWriteTime.ToString('yyyy-MM-dd')))" -NoConsole
+            $deleted++
+        } catch {
+            Write-Log "Could not delete old log '$($file.Name)': $($_.Exception.Message)" -Level WARN
+        }
+    }
+
+    if ($deleted) {
+        Write-Log "Deleted $deleted log file[s] older than $Days day[s]." -ForegroundColor Green
+    }
+}
+
+Initialize-Log -Directory $LogDirectory
+Remove-OldLog  -Directory $LogDirectory -Days $LogRetentionDays
 
 # --- Connect to SWIS ---
 $hostname = ""
@@ -125,15 +274,15 @@ function Stop-Sessions {
     if ($script:tokenString) {
         $script:tokenObj    = $null
         $script:tokenString = $null
-        Write-Host "Discarded the DNA API token." -ForegroundColor Green
+        Write-Log "Discarded the DNA API token." -ForegroundColor Green
     }
 
     if ($script:swis) {
         try {
             $script:swis.Close()
-            Write-Host "Closed the SWIS connection." -ForegroundColor Green
+            Write-Log "Closed the SWIS connection." -ForegroundColor Green
         } catch {
-            Write-Warning "Failed to close the SWIS connection: $($_.Exception.Message)"
+            Write-Log "Failed to close the SWIS connection: $($_.Exception.Message)" -Level WARN
         }
         $script:swis = $null
     }
@@ -147,12 +296,12 @@ try {
     $tokenString = $tokenObj.Token
 
     if (-not $tokenString) {
-        Write-Error "DNA authentication did not return a token. Check URL/credentials."
+        Write-Log "DNA authentication did not return a token. Check URL/credentials." -Level ERROR
         Stop-Sessions
         exit
     }
 } catch {
-    Write-Error "Failed to authenticate with DNA: $($_.Exception.Message)"
+    Write-Log "Failed to authenticate with DNA: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
 }
@@ -161,7 +310,7 @@ try {
 try {
     $results = Get-DNADevices -token $tokenString -url $dnaUrlDevices
 } catch {
-    Write-Error "Failed to retrieve devices from DNA: $($_.Exception.Message)"
+    Write-Log "Failed to retrieve devices from DNA: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
 }
@@ -169,17 +318,20 @@ try {
 # Get ip address of devices from results function
 $addresses = @($results.managementIpAddress)
 
+Write-Log "DNA returned $(@($results).Count) device[s], $($addresses.Count) with a management IP address."
+
+
 if (-not $addresses) {
-    Write-Warning "DNA returned no devices - nothing to process."
+    Write-Log "DNA returned no devices - nothing to process." -Level WARN
     Stop-Sessions
     exit
 }
 
 try {
     $swis = Connect-Swis -Host $hostname -UserName $username -Password $password.GetNetworkCredential().Password
-    Write-Host "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
+    Write-Log "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
 } catch {
-    Write-Error "Failed to connect to SWIS: $($_.Exception.Message)"
+    Write-Log "Failed to connect to SWIS: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
 }
@@ -246,6 +398,8 @@ function Add-Component {
     )) {
         $poller["PollerType"] = $pollerType
         New-SwisObject -SwisConnection $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
+        Write-Log "  poller added    | NodeID=$($nodeProps['NodeID']) | pollerType=$pollerType" -NoConsole
+        $script:stats.PollersAdded++
     }
 
     return $nodeProps["NodeID"]
@@ -259,7 +413,7 @@ function Add-DiscoveredInterfaces {
     $discovered = Invoke-SwisVerb $swis Orion.NPM.Interfaces DiscoverInterfacesOnNode $nodeId
 
     if ($discovered.Result -ne "Succeed") {
-        Write-Host " Interface discovery failed for node $nodeId." -ForegroundColor Red
+        Write-Log " Interface discovery failed for node $nodeId." -Level ERROR
         return
     }
 
@@ -275,25 +429,37 @@ function Add-DiscoveredInterfaces {
         $_.ifOperStatus -ne '1'
     } | ForEach-Object { $discovered.DiscoveredInterfaces.RemoveChild($_) | Out-Null }
 
-    $interfaceCount = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface).Count
+    # Where-Object drops the null that an emptied node list yields: @($null)
+    # has a Count of 1, so without it a run that filtered every interface away
+    # would report one interface and still call the add verb with nothing.
+    $keptInterfaces = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object { $_ })
+    $interfaceCount = $keptInterfaces.Count
 
     if ($interfaceCount -eq 0) {
-        Write-Host " No interfaces left to add for node $($nodeId) after filtering." -ForegroundColor DarkBlue
+        Write-Log " No interfaces left to add for node $($nodeId) after filtering." -ForegroundColor DarkBlue
         return
     }
+
+    # Collect the captions before the add, so the log can name each interface
+    # rather than only count them.
+    $captions = @($keptInterfaces | ForEach-Object { $_.Caption.InnerText })
 
     # Add the remaining interfaces
     try {
         Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-        Write-Host " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
+        Write-Log " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
+        foreach ($caption in $captions) {
+            Write-Log "  interface added | NodeID=$nodeId | caption=$caption" -NoConsole
+        }
+        $script:stats.InterfacesAdded += $interfaceCount
     } catch {
-        Write-Host " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -Level ERROR
     }
 }
 
 # --- Main Loop: Process each component ---
 foreach ($component in $components) {
-    Write-Host "Processing component $($component.IPAddress)..."
+    Write-Log "Processing component $($component.IPAddress)..."
 
     try {
         # Check if node already exists
@@ -301,22 +467,36 @@ foreach ($component in $components) {
 
         if ($existing) {
             $nodeId = $existing # Note: Get-SwisData returns an array of objects, access the property
-            Write-Host " Node already exists {NodeID $nodeId}, skipping add." -ForegroundColor DarkBlue
+            Write-Log " Node already exists {NodeID $nodeId}, skipping add." -ForegroundColor DarkBlue
+            Write-Log "  component       | IP=$($component.IPAddress) | status=exists | NodeID=$nodeId" -NoConsole
+            $script:stats.ComponentsExisting++
         }
         else {
             $nodeId = Add-Component $component
-            Write-Host " Added node [NodeID $nodeId]."
+            Write-Log " Added node [NodeID $nodeId]."
+            Write-Log "  component       | IP=$($component.IPAddress) | status=added | NodeID=$nodeId" -NoConsole
+            $script:stats.ComponentsAdded++
         }
 
         # Discover and add interfaces for the node (whether new or existing)
         Add-DiscoveredInterfaces $nodeId
 
     } catch {
-        Write-Host " Failed to process $($component.IPAddress): $($_.Exception.Message)"
+        Write-Log " Failed to process $($component.IPAddress): $($_.Exception.Message)" -Level ERROR
+        Write-Log "  component       | IP=$($component.IPAddress) | status=failed" -NoConsole
+        $script:stats.ComponentsFailed++
     }
 }
 
 # --- End the DNA and SWIS sessions ---
 Stop-Sessions
 
-Write-Host "Script completed."
+$summary = "Summary: $($script:stats.ComponentsAdded) component[s] added, " +
+           "$($script:stats.ComponentsExisting) already existed, " +
+           "$($script:stats.ComponentsFailed) failed; " +
+           "$($script:stats.InterfacesAdded) interface[s] and " +
+           "$($script:stats.PollersAdded) poller[s] added."
+Write-Log $summary -ForegroundColor Green
+
+Write-Log "Script completed."
+Write-Log "=== Run finished ===" -NoConsole
