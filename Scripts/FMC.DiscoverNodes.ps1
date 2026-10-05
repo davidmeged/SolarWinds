@@ -69,6 +69,20 @@
     Settings > SNMP). Without it the Details/Uptime pollers have nothing to
     poll.
 
+.PARAMETER LogPath
+    The log file. Every run appends to it: each device that already existed
+    or was added, every poller type registered on a new node, every
+    interface added, and a summary line at the end of the run.
+
+.PARAMETER LogMaxBytes
+    The size at which the log is rotated. Rotation keeps LogKeep older
+    generations beside it, so the space the logging can occupy is bounded at
+    roughly LogMaxBytes times LogKeep plus one.
+
+.PARAMETER LogKeep
+    How many rotated logs to keep. Zero keeps none: the log starts over
+    instead.
+
 .EXAMPLE
     .\FMC.DiscoverNodes.ps1
 
@@ -95,8 +109,104 @@ param(
     # Shared settings applied to every device retrieved from FMC.
     [int]$EngineID = 2,
     [int]$SNMPVersion = 2,
-    [string]$SNMPCommunity = ''
+    [string]$SNMPCommunity = '',
+
+    # --- Log ---
+    [string]$LogPath = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\fmc-discover-nodes.log'),
+
+    [ValidateRange(4KB, 100MB)]
+    [int]$LogMaxBytes = 1MB,
+
+    [ValidateRange(0, 20)]
+    [int]$LogKeep = 3
 )
+
+# --- Function: Rotate the log once it reaches LogMaxBytes ---
+function Invoke-LogRotation {
+    # Renames the log out of the way once it reaches -LogMaxBytes, keeping
+    # -LogKeep older generations: .log -> .log.1, .log.1 -> .log.2, and so on,
+    # with the oldest dropped. Run on a schedule the log would otherwise grow
+    # without bound.
+    param(
+        [Parameter(Mandatory)][string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ((Get-Item -LiteralPath $Path).Length -lt $script:LogMaxBytes) { return }
+
+    # Nothing to keep: the log simply starts over.
+    if ($script:LogKeep -lt 1) {
+        Remove-Item -LiteralPath $Path -Force
+        return
+    }
+
+    # Oldest generation falls off the end.
+    $oldest = "$Path.$($script:LogKeep)"
+    if (Test-Path -LiteralPath $oldest) {
+        Remove-Item -LiteralPath $oldest -Force
+    }
+
+    # Shift the rest down, highest first so nothing is overwritten on the way.
+    for ($i = $script:LogKeep - 1; $i -ge 1; $i--) {
+        $from = "$Path.$i"
+        if (Test-Path -LiteralPath $from) {
+            Move-Item -LiteralPath $from -Destination "$Path.$($i + 1)" -Force
+        }
+    }
+
+    Move-Item -LiteralPath $Path -Destination "$Path.1" -Force
+}
+
+# --- Function: Write a line to the console and the log ---
+function Write-Log {
+    <#
+    .SYNOPSIS
+        Show a message on the console and append it to the log file
+    .PARAMETER Message
+        The text to record
+    .PARAMETER Level
+        INFO goes to the console with Write-Host (in -Color when given),
+        WARN with Write-Warning and ERROR in red
+    .PARAMETER Color
+        Console color for an INFO message
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Message,
+
+        [ValidateSet('INFO', 'WARN', 'ERROR')]
+        [string] $Level = 'INFO',
+
+        [System.ConsoleColor] $Color
+    )
+
+    switch ($Level) {
+        'WARN'  { Write-Warning $Message }
+        'ERROR' { Write-Host $Message -ForegroundColor Red }
+        default {
+            if ($PSBoundParameters.ContainsKey('Color')) {
+                Write-Host $Message -ForegroundColor $Color
+            } else {
+                Write-Host $Message
+            }
+        }
+    }
+
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [{1,-5}] {2}' -f (Get-Date), $Level, $Message
+
+    try {
+        $directory = Split-Path -Path $script:LogPath -Parent
+        if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+            New-Item -Path $directory -ItemType Directory -Force | Out-Null
+        }
+        Invoke-LogRotation -Path $script:LogPath
+        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
+    }
+    catch {
+        Write-Warning "Could not write to the log file '$script:LogPath': $($_.Exception.Message)"
+    }
+}
 
 # --- Function: Read a header from a FMC response ---
 function Get-FmcHeaderValue {
@@ -246,7 +356,7 @@ function Invoke-FmcApi {
                 # Over the 120 requests per minute limit - back off before
                 # trying again.
                 $delay = 20 * $attempt
-                Write-Warning "FMC rate limit reached, retrying in $delay seconds..."
+                Write-Log "FMC rate limit reached, retrying in $delay seconds..." -Level WARN
                 Start-Sleep -Seconds $delay
             }
             else {
@@ -322,7 +432,7 @@ function Resolve-ManagementAddress {
             return $ipv4.ToString()
         }
     } catch {
-        Write-Warning "Could not resolve '$HostName': $($_.Exception.Message)"
+        Write-Log "Could not resolve '$HostName': $($_.Exception.Message)" -Level WARN
     }
 
     return $null
@@ -346,9 +456,9 @@ function Stop-Sessions {
     if ($script:fmcSession) {
         try {
             Disconnect-Fmc -Session $script:fmcSession
-            Write-Host "Revoked the FMC API token." -ForegroundColor Green
+            Write-Log "Revoked the FMC API token." -Color Green
         } catch {
-            Write-Warning "Failed to revoke the FMC API token: $($_.Exception.Message)"
+            Write-Log "Failed to revoke the FMC API token: $($_.Exception.Message)" -Level WARN
         }
         $script:fmcSession = $null
     }
@@ -356,20 +466,29 @@ function Stop-Sessions {
     if ($script:swis) {
         try {
             $script:swis.Close()
-            Write-Host "Closed the SWIS connection." -ForegroundColor Green
+            Write-Log "Closed the SWIS connection." -Color Green
         } catch {
-            Write-Warning "Failed to close the SWIS connection: $($_.Exception.Message)"
+            Write-Log "Failed to close the SWIS connection: $($_.Exception.Message)" -Level WARN
         }
         $script:swis = $null
     }
 }
+
+# --- Counters for the summary at the end of the run ---
+$existingCount   = 0
+$addedCount      = 0
+$skippedCount    = 0
+$failedCount     = 0
+$interfaceTotal  = 0
+
+Write-Log "===== Run started: FMC $FmcServer -> SolarWinds $SwisHost ====="
 
 # Call function "Connect-Fmc"
 try {
     $fmcCredentials = Import-Clixml -Path $FmcCredentialPath
     $fmcSession     = Connect-Fmc -Server $FmcServer -Credential $fmcCredentials -TrustAllCertificates
 } catch {
-    Write-Error "Failed to authenticate with FMC: $($_.Exception.Message)"
+    Write-Log "Failed to authenticate with FMC: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
 }
@@ -378,7 +497,7 @@ try {
 try {
     $results = Get-FmcDeviceRecords -Session $fmcSession
 } catch {
-    Write-Error "Failed to retrieve devices from FMC: $($_.Exception.Message)"
+    Write-Log "Failed to retrieve devices from FMC: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
 }
@@ -387,17 +506,19 @@ try {
 # instead of letting it run out (30 minutes) while the nodes are added.
 Stop-Sessions
 
+Write-Log "FMC returned $(@($results).Count) device[s]."
+
 if (-not $results) {
-    Write-Warning "FMC returned no devices - nothing to process."
+    Write-Log "FMC returned no devices - nothing to process." -Level WARN
     exit
 }
 
 try {
     $swisCredentials = Import-Clixml -Path $SwisCredentialPath
     $swis = Connect-Swis -Hostname $SwisHost -Credential $swisCredentials
-    Write-Host "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
+    Write-Log "Connected to SolarWinds Information Service (SWIS) on $SwisHost." -Color Green
 } catch {
-    Write-Error "Failed to connect to SWIS: $($_.Exception.Message)"
+    Write-Log "Failed to connect to SWIS: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
 }
@@ -410,7 +531,8 @@ $components = foreach ($device in $results) {
     $ip = Resolve-ManagementAddress -HostName $device.HostName
 
     if (-not $ip) {
-        Write-Warning "Skipping '$($device.Name)' - no usable management address ('$($device.HostName)')."
+        Write-Log "Skipping '$($device.Name)' - no usable management address ('$($device.HostName)')." -Level WARN
+        $script:skippedCount++
         continue
     }
 
@@ -465,6 +587,7 @@ function Add-Component {
     )) {
         $poller["PollerType"] = $pollerType
         New-SwisObject -SwisConnection $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
+        Write-Log "  Added poller $pollerType to node $($nodeProps["NodeID"])."
     }
 
     return $nodeProps["NodeID"]
@@ -478,7 +601,7 @@ function Add-DiscoveredInterfaces {
     $discovered = Invoke-SwisVerb $swis Orion.NPM.Interfaces DiscoverInterfacesOnNode $nodeId
 
     if ($discovered.Result -ne "Succeed") {
-        Write-Host " Interface discovery failed for node $nodeId." -ForegroundColor Red
+        Write-Log " Interface discovery failed for node $nodeId." -Level ERROR
         return
     }
 
@@ -499,22 +622,40 @@ function Add-DiscoveredInterfaces {
     $interfaceCount = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object { $_ }).Count
 
     if ($interfaceCount -eq 0) {
-        Write-Host " No interfaces left to add for node $($nodeId) after filtering." -ForegroundColor DarkBlue
+        Write-Log " No interfaces left to add for node $($nodeId) after filtering." -Color DarkBlue
         return
     }
 
-    # Add the remaining interfaces
+    # Add the remaining interfaces. The node's interfaces are read before and
+    # after the add, so the log names exactly the interfaces that were added
+    # and not the ones that were already monitored.
+    $interfaceQuery = "SELECT InterfaceID, Caption FROM Orion.NPM.Interfaces WHERE NodeID = @nodeId"
     try {
+        $before = @(Get-SwisData -SwisConnection $swis -Query $interfaceQuery -Parameters @{ nodeId = $nodeId } | ForEach-Object { $_.InterfaceID })
+
         Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-        Write-Host " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
+
+        $added = @(Get-SwisData -SwisConnection $swis -Query $interfaceQuery -Parameters @{ nodeId = $nodeId } |
+            Where-Object { $before -notcontains $_.InterfaceID })
+
+        if ($added.Count -eq 0) {
+            Write-Log " No new interfaces for node $($nodeId) - the $interfaceCount matching interface[s] were already monitored." -Color DarkBlue
+            return
+        }
+
+        foreach ($interface in $added) {
+            Write-Log "  Added interface $($interface.Caption) [InterfaceID $($interface.InterfaceID)] to node $nodeId." -Color Green
+        }
+        Write-Log " Added $($added.Count) interface[s] for node $($nodeId)." -Color Green
+        $script:interfaceTotal += $added.Count
     } catch {
-        Write-Host " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -Level ERROR
     }
 }
 
 # --- Main Loop: Process each component ---
 foreach ($component in $components) {
-    Write-Host "Processing component $($component.Caption) ($($component.IPAddress))..."
+    Write-Log "Processing component $($component.Caption) ($($component.IPAddress))..."
 
     try {
         # Check if node already exists
@@ -522,22 +663,25 @@ foreach ($component in $components) {
 
         if ($existing) {
             $nodeId = @($existing)[0]
-            Write-Host " Node already exists {NodeID $nodeId}, skipping add." -ForegroundColor DarkBlue
+            Write-Log " Node already exists: $($component.Caption) ($($component.IPAddress)) [NodeID $nodeId], skipping add." -Color DarkBlue
+            $existingCount++
         }
         else {
             $nodeId = Add-Component $component
-            Write-Host " Added node [NodeID $nodeId]." -ForegroundColor Green
+            Write-Log " Added node: $($component.Caption) ($($component.IPAddress)) [NodeID $nodeId]." -Color Green
+            $addedCount++
         }
 
         # Discover and add interfaces for the node (whether new or existing)
         Add-DiscoveredInterfaces $nodeId
 
     } catch {
-        Write-Host " Failed to process $($component.IPAddress): $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log " Failed to process $($component.Caption) ($($component.IPAddress)): $($_.Exception.Message)" -Level ERROR
+        $failedCount++
     }
 }
 
 # --- End the FMC and SWIS sessions ---
 Stop-Sessions
 
-Write-Host "Script completed."
+Write-Log "===== Run completed: $addedCount node[s] added, $existingCount already existed, $skippedCount skipped, $failedCount failed, $interfaceTotal interface[s] added ====="
