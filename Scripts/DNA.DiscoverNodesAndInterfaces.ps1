@@ -24,10 +24,22 @@
     Cisco DNA Center inventory: every device the DNA API reports is added
     by its management IP address.
 
-    Every run writes a timestamped log file under -LogDirectory recording
-    each component that was added or already existed, every interface that
-    was added, and every poller that was registered. Log files older than
-    -LogRetentionDays are deleted at the start of each run.
+    Every run records each component that was added or already existed,
+    every interface that was added, and every poller that was registered.
+
+.PARAMETER LogPath
+    The log file this script writes to. It is bounded by rotation rather
+    than by age, the same way DNS.SetSolarWindsRecordToActiveServer.ps1
+    bounds its own log.
+
+.PARAMETER LogMaxBytes
+    The size at which the log is rotated. Rotation keeps LogKeep older
+    generations beside it, so the space the logging can occupy is bounded at
+    roughly LogMaxBytes times LogKeep plus one.
+
+.PARAMETER LogKeep
+    How many rotated logs to keep. Zero keeps none: the log starts over
+    instead.
 #>
 
 param(
@@ -36,21 +48,26 @@ param(
     [int]$SNMPVersion = 2,
     [string]$SNMPCommunity = '',
 
-    # Where each run's log is written, and how long older logs are kept.
-    # A retention of 0 or less keeps every log file.
-    [string]$LogDirectory = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\DNA.DiscoverNodesAndInterfaces'),
+    [string] $LogPath = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\dna-discover-nodes.log'),
 
-    [ValidateRange(0, 3650)]
-    [int]$LogRetentionDays = 30
+    [ValidateRange(4KB, 100MB)]
+    [int] $LogMaxBytes = 1MB,
+
+    [ValidateRange(0, 20)]
+    [int] $LogKeep = 3
 )
 
 # --- Logging ---
-# Mirrors the Write-Log convention of DNS.SetSolarWindsRecordToActiveServer.ps1
-# (same level set, same line format, same UTF8 Add-Content), but keeps a file
-# per run and prunes by age, because this script is the kind of scheduled job
-# whose per-run record is what you go back to read.
-$script:logFile = $null
-$script:stats   = [ordered]@{
+# Follows DNS.SetSolarWindsRecordToActiveServer.ps1: one log file bounded by
+# size-based rotation, the same level set and line format, and the same lazy
+# creation of the log directory on first write.
+#
+# One deviation from that script: it sets $ErrorActionPreference = 'Stop'
+# script-wide, which is what makes its bare file cmdlets catchable. This
+# script does not, so the file calls below carry -ErrorAction Stop of their
+# own; without it a failed write escapes the catch as a raw error instead of
+# the intended warning.
+$script:stats = [ordered]@{
     ComponentsAdded    = 0
     ComponentsExisting = 0
     ComponentsFailed   = 0
@@ -58,17 +75,45 @@ $script:stats   = [ordered]@{
     PollersAdded       = 0
 }
 
+function Invoke-LogRotation {
+    # Renames the log out of the way once it reaches -LogMaxBytes, keeping
+    # -LogKeep older generations: .log -> .log.1, .log.1 -> .log.2, and so on,
+    # with the oldest dropped. Run on a schedule the log would otherwise grow
+    # without bound.
+    param(
+        [Parameter(Mandatory)][string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ((Get-Item -LiteralPath $Path).Length -lt $script:LogMaxBytes) { return }
+
+    # Nothing to keep: the log simply starts over.
+    if ($script:LogKeep -lt 1) {
+        Remove-Item -LiteralPath $Path -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+        return
+    }
+
+    # Oldest generation falls off the end.
+    $oldest = "$Path.$($script:LogKeep)"
+    if (Test-Path -LiteralPath $oldest) {
+        Remove-Item -LiteralPath $oldest -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+    }
+
+    # Shift the rest down, highest first so nothing is overwritten on the way.
+    for ($i = $script:LogKeep - 1; $i -ge 1; $i--) {
+        $from = "$Path.$i"
+        if (Test-Path -LiteralPath $from) {
+            Move-Item -LiteralPath $from -Destination "$Path.$($i + 1)" -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+        }
+    }
+
+    Move-Item -LiteralPath $Path -Destination "$Path.1" -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+}
+
 function Write-Log {
     <#
     .SYNOPSIS
         Record one line in the run log, and on the console unless suppressed
-    .PARAMETER Message
-        The text to record.
-    .PARAMETER Level
-        INFO, WARN or ERROR. The level also picks the console stream, so
-        warnings and errors still reach the host's warning and error streams.
-    .PARAMETER ForegroundColor
-        Console colour for an INFO line; ignored for the other levels.
     .PARAMETER NoConsole
         Write to the log file only. Used for the per-item detail lines - every
         component, interface and poller - which belong in the record but would
@@ -82,104 +127,30 @@ function Write-Log {
         [ValidateSet('INFO', 'WARN', 'ERROR')]
         [string] $Level = 'INFO',
 
-        [string] $ForegroundColor,
-
         [switch] $NoConsole
     )
 
-    if (-not $NoConsole) {
-        switch ($Level) {
-            'WARN'  { Write-Warning $Message }
-            'ERROR' { Write-Error   $Message }
-            default {
-                if ($ForegroundColor) { Write-Host $Message -ForegroundColor $ForegroundColor }
-                else                  { Write-Host $Message }
-            }
-        }
-    }
-
-    if (-not $script:logFile) { return }
-
     $line = '{0:yyyy-MM-dd HH:mm:ss} [{1,-5}] {2}' -f (Get-Date), $Level, $Message
+    if (-not $NoConsole) {
+        Write-Information -MessageData $line -InformationAction Continue
+    }
+
+    # -WhatIf:$false so that a -WhatIf run still leaves a trace of what it
+    # decided; the log is a record, never one of the changes being previewed.
     try {
-        Add-Content -LiteralPath $script:logFile -Value $line -Encoding UTF8
-    } catch {
-        # A logging failure must not take the run down, and must not recurse
-        # back into Write-Log. Drop the path so this warns once, not per line.
-        Write-Warning "Could not write to the log file '$script:logFile': $($_.Exception.Message)"
-        $script:logFile = $null
-    }
-}
-
-function Initialize-Log {
-    <#
-    .SYNOPSIS
-        Create the log directory and open this run's log file
-    #>
-    param(
-        [Parameter(Mandatory)][string] $Directory
-    )
-
-    if (-not (Test-Path -LiteralPath $Directory)) {
-        New-Item -Path $Directory -ItemType Directory -Force | Out-Null
-    }
-
-    $name = 'DNA.DiscoverNodesAndInterfaces_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date)
-    $script:logFile = Join-Path -Path $Directory -ChildPath $name
-
-    Write-Host "Logging to $($script:logFile)." -ForegroundColor Green
-    Write-Log "=== Run started ===" -NoConsole
-}
-
-function Remove-OldLog {
-    <#
-    .SYNOPSIS
-        Delete this script's own log files older than the retention period
-    .DESCRIPTION
-        Only files matching this script's own log name pattern are considered,
-        so nothing else that happens to sit in the log directory is touched,
-        and the current run's file is excluded by name as well as by age. A
-        retention of 0 or less disables the purge and keeps every log.
-    #>
-    param(
-        [Parameter(Mandatory)][string] $Directory,
-        [Parameter(Mandatory)][int]    $Days
-    )
-
-    if ($Days -le 0) {
-        Write-Log "Log retention disabled (LogRetentionDays = $Days); keeping every log file." -NoConsole
-        return
-    }
-
-    $cutoff  = (Get-Date).AddDays(-$Days)
-    $current = Split-Path -Path $script:logFile -Leaf
-
-    try {
-        $old = @(Get-ChildItem -LiteralPath $Directory -Filter 'DNA.DiscoverNodesAndInterfaces_*.log' -File -ErrorAction Stop |
-            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.Name -ne $current })
-    } catch {
-        Write-Log "Could not list the log directory '$Directory': $($_.Exception.Message)" -Level WARN
-        return
-    }
-
-    $deleted = 0
-    foreach ($file in $old) {
-        try {
-            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
-            Write-Log "Deleted old log: $($file.Name) (last written $($file.LastWriteTime.ToString('yyyy-MM-dd')))" -NoConsole
-            $deleted++
-        } catch {
-            Write-Log "Could not delete old log '$($file.Name)': $($_.Exception.Message)" -Level WARN
+        $directory = Split-Path -Path $script:LogPath -Parent
+        if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+            New-Item -Path $directory -ItemType Directory -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop | Out-Null
         }
+        Invoke-LogRotation -Path $script:LogPath
+        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -WhatIf:$false -Confirm:$false -ErrorAction Stop
     }
-
-    if ($deleted) {
-        Write-Log "Deleted $deleted log file[s] older than $Days day[s]." -ForegroundColor Green
+    catch {
+        Write-Warning "Could not write to the log file '$script:LogPath': $($_.Exception.Message)"
     }
 }
 
-Initialize-Log -Directory $LogDirectory
-Remove-OldLog  -Directory $LogDirectory -Days $LogRetentionDays
+Write-Log "===== Run started ====="
 
 # --- Connect to SWIS ---
 $hostname = ""
@@ -274,13 +245,13 @@ function Stop-Sessions {
     if ($script:tokenString) {
         $script:tokenObj    = $null
         $script:tokenString = $null
-        Write-Log "Discarded the DNA API token." -ForegroundColor Green
+        Write-Log "Discarded the DNA API token."
     }
 
     if ($script:swis) {
         try {
             $script:swis.Close()
-            Write-Log "Closed the SWIS connection." -ForegroundColor Green
+            Write-Log "Closed the SWIS connection."
         } catch {
             Write-Log "Failed to close the SWIS connection: $($_.Exception.Message)" -Level WARN
         }
@@ -329,7 +300,7 @@ if (-not $addresses) {
 
 try {
     $swis = Connect-Swis -Host $hostname -UserName $username -Password $password.GetNetworkCredential().Password
-    Write-Log "Connected to SolarWinds Information Service (SWIS)." -ForegroundColor Green
+    Write-Log "Connected to SolarWinds Information Service (SWIS)."
 } catch {
     Write-Log "Failed to connect to SWIS: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
@@ -436,7 +407,7 @@ function Add-DiscoveredInterfaces {
     $interfaceCount = $keptInterfaces.Count
 
     if ($interfaceCount -eq 0) {
-        Write-Log " No interfaces left to add for node $($nodeId) after filtering." -ForegroundColor DarkBlue
+        Write-Log " No interfaces left to add for node $($nodeId) after filtering."
         return
     }
 
@@ -447,7 +418,7 @@ function Add-DiscoveredInterfaces {
     # Add the remaining interfaces
     try {
         Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-        Write-Log " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
+        Write-Log " Added $interfaceCount interface[s] for node $($nodeId)."
         foreach ($caption in $captions) {
             Write-Log "  interface added | NodeID=$nodeId | caption=$caption" -NoConsole
         }
@@ -467,7 +438,7 @@ foreach ($component in $components) {
 
         if ($existing) {
             $nodeId = $existing # Note: Get-SwisData returns an array of objects, access the property
-            Write-Log " Node already exists {NodeID $nodeId}, skipping add." -ForegroundColor DarkBlue
+            Write-Log " Node already exists {NodeID $nodeId}, skipping add."
             Write-Log "  component       | IP=$($component.IPAddress) | status=exists | NodeID=$nodeId" -NoConsole
             $script:stats.ComponentsExisting++
         }
@@ -496,7 +467,7 @@ $summary = "Summary: $($script:stats.ComponentsAdded) component[s] added, " +
            "$($script:stats.ComponentsFailed) failed; " +
            "$($script:stats.InterfacesAdded) interface[s] and " +
            "$($script:stats.PollersAdded) poller[s] added."
-Write-Log $summary -ForegroundColor Green
+Write-Log $summary
 
 Write-Log "Script completed."
 Write-Log "=== Run finished ===" -NoConsole
