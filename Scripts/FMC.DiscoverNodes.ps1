@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    SolarWinds SWIS PowerShell script  add the devices managed by Cisco FMC as nodes
+    SolarWinds SWIS PowerShell script  add the devices managed by Cisco FMC as nodes and discover their interfaces
 
 .DESCRIPTION
     This script combines the Cisco Secure Firewall Management Center (FMC)
@@ -15,8 +15,16 @@
           registers the standard set of pollers for it (Status, Response
           Time, Details, Uptime).
 
-    The result is a single script that walks the devices FMC reports and
-    adds every one of them that does not already exist in SolarWinds.
+    o NPM.DiscoverAndAddInterfacesOnNode.ps1
+        - uses Orion.NPM.Interfaces.DiscoverInterfacesOnNode and
+          Orion.NPM.Interfaces.AddInterfacesOnNode (SWISv3 verbs, NPM only)
+          to discover and add the interfaces of a node.
+
+    The result is a single script that walks the devices FMC reports, adds
+    every one of them that does not already exist in SolarWinds, and then
+    discovers and adds their interfaces for monitoring. The interface filter
+    in Add-DiscoveredInterfaces decides which interfaces are kept - adjust
+    it to the interfaces you want monitored on the FTD devices.
 
     FMC registers a device by its management address, which may be an IP
     address or a DNS name. A DNS name is resolved to its first IPv4 address,
@@ -462,6 +470,48 @@ function Add-Component {
     return $nodeProps["NodeID"]
 }
 
+# --- Function: Discover and Add Interfaces on a Node ---
+function Add-DiscoveredInterfaces {
+    param($nodeId)
+
+    # Discover interfaces on the node
+    $discovered = Invoke-SwisVerb $swis Orion.NPM.Interfaces DiscoverInterfacesOnNode $nodeId
+
+    if ($discovered.Result -ne "Succeed") {
+        Write-Host " Interface discovery failed for node $nodeId." -ForegroundColor Red
+        return
+    }
+
+    # Keep only TenGigabit and Port-channel interfaces that are operationally
+    # up (ifOperStatus 1). Both the long captions and the abbreviated Cisco
+    # forms are accepted; everything else is removed before the add.
+    #
+    # The node list is materialised with @() first: RemoveChild shrinks the
+    # live XmlNodeList, and removing from it while the pipeline is still
+    # enumerating it skips nodes.
+    @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface) | Where-Object {
+        $_.Caption.InnerText -notmatch '^(TenGigabitEthernet|TenGigE|Te\d|Port-channel|Po\d)' -or
+        $_.ifOperStatus -ne '1'
+    } | ForEach-Object { $discovered.DiscoveredInterfaces.RemoveChild($_) | Out-Null }
+
+    # Where-Object drops the $null left once every interface was removed -
+    # @($null).Count is 1, which would report one interface and add none.
+    $interfaceCount = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object { $_ }).Count
+
+    if ($interfaceCount -eq 0) {
+        Write-Host " No interfaces left to add for node $($nodeId) after filtering." -ForegroundColor DarkBlue
+        return
+    }
+
+    # Add the remaining interfaces
+    try {
+        Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
+        Write-Host " Added $interfaceCount interface[s] for node $($nodeId)." -ForegroundColor Green
+    } catch {
+        Write-Host " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
 # --- Main Loop: Process each component ---
 foreach ($component in $components) {
     Write-Host "Processing component $($component.Caption) ($($component.IPAddress))..."
@@ -478,6 +528,9 @@ foreach ($component in $components) {
             $nodeId = Add-Component $component
             Write-Host " Added node [NodeID $nodeId]." -ForegroundColor Green
         }
+
+        # Discover and add interfaces for the node (whether new or existing)
+        Add-DiscoveredInterfaces $nodeId
 
     } catch {
         Write-Host " Failed to process $($component.IPAddress): $($_.Exception.Message)" -ForegroundColor Red
