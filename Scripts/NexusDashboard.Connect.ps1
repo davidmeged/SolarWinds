@@ -80,17 +80,9 @@
 #>
 
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Server,
-
-    [ValidateRange(1, 65535)]
-    [int]$Port = 443,
-
-    [string]$Username = "admin",
-
-    [string]$Domain = "DefaultAuth",
-
-    [string]$CredentialPath = "",
+    # --- Cisco Nexus Dashboard connection ---
+    [string]$NXServer = "1.1.1.1",
+    [string]$NXCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\FMC_Credential.xml",
 
     [switch]$TrustAllCertificates,
 
@@ -305,21 +297,21 @@ function Disconnect-NexusDashboard {
 
 # A saved credential for unattended runs, otherwise a prompt that keeps the
 # password as a SecureString.
-if ($CredentialPath) {
+if ($NXCredentialPath) {
     $credential = Import-Clixml -Path $CredentialPath
 }
 else {
     $credential = Get-Credential -UserName $Username -Message "Nexus Dashboard API credentials"
 }
 
-$session = Connect-NexusDashboard -Server $Server -Port $Port `
-    -Username $credential.UserName `
-    -Password $credential.Password `
+$session = Connect-NexusDashboard -Server $NXServer
+    -Username $NXCredentialPath.UserName `
+    -Password $NXCredentialPath.Password `
     -Domain $Domain `
     -TokenRefreshMinutes $TokenRefreshMinutes `
     -TrustAllCertificates:$TrustAllCertificates
 
-Write-Host "Connected to $Server as $($session.Username)"
+Write-Host "Connected to $NXServer as $($session.Username)"
 
 try {
     # Read-only call that proves the session works: the nodes that make up the
