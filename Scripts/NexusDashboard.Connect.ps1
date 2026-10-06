@@ -1,18 +1,104 @@
-# This sample script demonstrates how to authenticate against the Cisco Nexus
-# Dashboard (ND) REST API, keep the returned JWT for follow-up calls, refresh it
-# before it expires, run a couple of read-only requests and log out cleanly.
-#
-# It is the first building block of the Nexus Dashboard -> SolarWinds
-# integration: once the session works, the switch inventory read at the bottom
-# is what later gets added to SolarWinds as nodes, the same way
-# DNA.DiscoverNodesAndInterfaces.ps1 does it for Cisco DNA Center.
-#
-# Please update the Nexus Dashboard details and credential setup below to match
-# your environment.
-#
-# Works on Windows PowerShell 5.1 and PowerShell 7+. Nexus Dashboard ships with a
-# self-signed certificate, so use -TrustAllCertificates while testing and import
-# the certificate into the trust store for production use.
+<#
+.SYNOPSIS
+    Cisco Nexus Dashboard REST API - connect, read the switch inventory and
+    log out
+
+.DESCRIPTION
+    First building block of the Nexus Dashboard -> SolarWinds integration.
+    The script:
+
+    o authenticates against the Nexus Dashboard (ND) REST API (POST /login)
+      and keeps the returned JWT for follow-up calls;
+    o refreshes the token (POST /refresh) before it expires - ND tokens are
+      valid for 20 minutes by default, so a long run would otherwise fail
+      half way;
+    o runs two read-only requests that prove the session works:
+        - the nodes of the Nexus Dashboard cluster itself;
+        - the switch inventory managed by the Fabric Controller (NDFC)
+          service. These switches are the components that the next step
+          adds to SolarWinds as nodes by their management IP address, the
+          same way DNA.DiscoverNodesAndInterfaces.ps1 does it for Cisco DNA
+          Center;
+    o logs out (POST /logout) in a finally block, so the token is revoked
+      even when a request fails.
+
+    The functions - Connect-NexusDashboard, Update-NexusDashboardToken,
+    Invoke-NexusDashboardApi and Disconnect-NexusDashboard - are written to
+    be reused unchanged by the discovery script that builds on this one.
+
+    Works on Windows PowerShell 5.1 and PowerShell 7+. Nexus Dashboard ships
+    with a self-signed certificate, so use -TrustAllCertificates while
+    testing and import the certificate into the trust store for production
+    use.
+
+.PARAMETER Server
+    Host name or IP address of the Nexus Dashboard (the cluster's management
+    address).
+
+.PARAMETER Port
+    HTTPS port of the Nexus Dashboard API. 443 unless it was changed.
+
+.PARAMETER Username
+    The API user. Only used when -CredentialPath is not given: it is the
+    name pre-filled in the credential prompt.
+
+.PARAMETER Domain
+    Login domain. "DefaultAuth" is the local user database; for a remote
+    (RADIUS/TACACS/LDAP) user pass the login domain name configured in ND.
+
+.PARAMETER CredentialPath
+    Path to a credential saved with Export-Clixml, for unattended runs
+    (scheduled task). Without it the script prompts for the password.
+    Create the file once, as the account the task runs under:
+        Get-Credential | Export-Clixml -Path .\Credentials\NexusDashboardCredential.xml
+
+.PARAMETER TrustAllCertificates
+    Accept the self-signed certificate of the Nexus Dashboard. Meant for
+    testing; import the certificate into the trust store for production.
+
+.PARAMETER TokenRefreshMinutes
+    Age, in minutes, after which the token is renewed before the next call.
+    Must stay below the token lifetime configured in ND (20 minutes by
+    default).
+
+.PARAMETER SkipSwitchInventory
+    Only test the login and the cluster nodes, without reading the switch
+    inventory. Use it when the Fabric Controller service is not installed on
+    this Nexus Dashboard - the inventory request fails without it.
+
+.EXAMPLE
+    .\NexusDashboard.Connect.ps1 -Server nd.example.local -TrustAllCertificates
+
+    Prompts for the password of "admin" and prints the cluster nodes and the
+    switch inventory.
+
+.EXAMPLE
+    .\NexusDashboard.Connect.ps1 -Server nd.example.local -Domain RadiusDomain `
+        -CredentialPath .\Credentials\NexusDashboardCredential.xml
+
+    Unattended run as a RADIUS user, with the credential read from a file.
+#>
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Server,
+
+    [ValidateRange(1, 65535)]
+    [int]$Port = 443,
+
+    [string]$Username = "admin",
+
+    [string]$Domain = "DefaultAuth",
+
+    [string]$CredentialPath = "",
+
+    [switch]$TrustAllCertificates,
+
+    [ValidateRange(1, 19)]
+    [int]$TokenRefreshMinutes = 15,
+
+    [switch]$SkipSwitchInventory
+)
 
 function Set-NexusDashboardCertificatePolicy {
     # PowerShell 5.1 has no -SkipCertificateCheck on Invoke-RestMethod, so the
@@ -62,7 +148,10 @@ function Connect-NexusDashboard {
         # Login domain. "DefaultAuth" is the local user database; for a remote
         # (RADIUS/TACACS/LDAP) user pass the login domain name configured in ND.
         [string]$Domain = "DefaultAuth",
-        [switch]$TrustAllCertificates
+        [switch]$TrustAllCertificates,
+        # Renew the token once it is older than this, ahead of the 20 minute
+        # default expiry.
+        [int]$TokenRefreshMinutes = 15
     )
 
     if ($TrustAllCertificates) { Set-NexusDashboardCertificatePolicy }
@@ -124,6 +213,7 @@ function Connect-NexusDashboard {
         Username             = $Username
         Token                = $token
         IssuedAt             = Get-Date
+        TokenRefreshMinutes  = $TokenRefreshMinutes
         TrustAllCertificates = [bool]$TrustAllCertificates
     }
 }
@@ -168,13 +258,10 @@ function Invoke-NexusDashboardApi {
         [Parameter(Mandatory = $true)] [pscustomobject]$Session,
         [Parameter(Mandatory = $true)] [string]$Path,
         [ValidateSet("Get", "Post", "Put", "Delete")] [string]$Method = "Get",
-        $Body,
-        # Renew the token once it is older than this, ahead of the 20 minute
-        # default expiry.
-        [int]$RefreshAfterMinutes = 15
+        $Body
     )
 
-    if (((Get-Date) - $Session.IssuedAt).TotalMinutes -ge $RefreshAfterMinutes) {
+    if (((Get-Date) - $Session.IssuedAt).TotalMinutes -ge $Session.TokenRefreshMinutes) {
         Update-NexusDashboardToken -Session $Session
     }
 
@@ -214,22 +301,25 @@ function Disconnect-NexusDashboard {
     }
 }
 
-# --- Example usage ----------------------------------------------------------
+# --- Main --------------------------------------------------------------------
 
-$server = "nexusdashboard.example.local"
-$username = "admin"
+# A saved credential for unattended runs, otherwise a prompt that keeps the
+# password as a SecureString.
+if ($CredentialPath) {
+    $credential = Import-Clixml -Path $CredentialPath
+}
+else {
+    $credential = Get-Credential -UserName $Username -Message "Nexus Dashboard API credentials"
+}
 
-# Prompts once and keeps the password as a SecureString. For unattended runs,
-# read the credential from a secret store instead of prompting, e.g.
-#   $credential = Get-Secret -Name NexusDashboardApi
-$credential = Get-Credential -UserName $username -Message "Nexus Dashboard API credentials"
-
-$session = Connect-NexusDashboard -Server $server `
+$session = Connect-NexusDashboard -Server $Server -Port $Port `
     -Username $credential.UserName `
     -Password $credential.Password `
-    -TrustAllCertificates
+    -Domain $Domain `
+    -TokenRefreshMinutes $TokenRefreshMinutes `
+    -TrustAllCertificates:$TrustAllCertificates
 
-Write-Host "Connected to $server as $($session.Username)"
+Write-Host "Connected to $Server as $($session.Username)"
 
 try {
     # Read-only call that proves the session works: the nodes that make up the
@@ -246,25 +336,27 @@ try {
         }
     } | Format-Table -AutoSize | Out-String | Write-Host
 
-    # The switch inventory managed by the Fabric Controller (NDFC) service on
-    # this Nexus Dashboard. These are the components that the next step adds to
-    # SolarWinds as nodes, by their management IP address.
-    $switches = Invoke-NexusDashboardApi -Session $session `
-        -Path "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/inventory/allswitches"
+    if (-not $SkipSwitchInventory) {
+        # The switch inventory managed by the Fabric Controller (NDFC) service on
+        # this Nexus Dashboard. These are the components that the next step adds to
+        # SolarWinds as nodes, by their management IP address.
+        $switches = Invoke-NexusDashboardApi -Session $session `
+            -Path "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/inventory/allswitches"
 
-    Write-Host "Switches managed by Nexus Dashboard Fabric Controller:"
-    $switches | ForEach-Object {
-        [pscustomobject]@{
-            Name      = $_.logicalName
-            IPAddress = $_.ipAddress
-            Model     = $_.model
-            Serial    = $_.serialNumber
-            Fabric    = $_.fabricName
-            Role      = $_.switchRole
-            Version   = $_.release
-            Status    = $_.status
-        }
-    } | Format-Table -AutoSize | Out-String | Write-Host
+        Write-Host "Switches managed by Nexus Dashboard Fabric Controller:"
+        $switches | ForEach-Object {
+            [pscustomobject]@{
+                Name      = $_.logicalName
+                IPAddress = $_.ipAddress
+                Model     = $_.model
+                Serial    = $_.serialNumber
+                Fabric    = $_.fabricName
+                Role      = $_.switchRole
+                Version   = $_.release
+                Status    = $_.status
+            }
+        } | Format-Table -AutoSize | Out-String | Write-Host
+    }
 }
 finally {
     Disconnect-NexusDashboard -Session $session
