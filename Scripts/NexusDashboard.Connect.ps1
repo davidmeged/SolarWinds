@@ -48,8 +48,11 @@
     the file once, as the account the task runs under:
         Get-Credential | Export-Clixml -Path D:\SolarWindsScripts\PowerShell\Credentials\NexusDashboard_Credential.xml
 
-    The user logs in to the local user database (DefaultAuth); a remote
-    RADIUS/TACACS/LDAP user needs -Domain on Connect-NexusDashboard.
+.PARAMETER NXDomain
+    The ND login domain the user authenticates against. "TACACS" is the
+    TACACS+ login domain; it must match the domain name configured in ND
+    (Admin > Authentication > Login Domains) exactly, case included. Use
+    "DefaultAuth" for a user from the local ND user database.
 
 .PARAMETER TrustAllCertificates
     Accept the self-signed certificate of the Nexus Dashboard. Meant for
@@ -95,6 +98,7 @@ param(
     # --- Cisco Nexus Dashboard connection ---
     [string]$NXServer = "1.1.1.1",
     [string]$NXCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\FMC_Credential.xml",
+    [string]$NXDomain = "TACACS",
 
     [switch]$TrustAllCertificates,
 
@@ -404,6 +408,7 @@ try {
     $session = Connect-NexusDashboard -Server $NXServer `
         -Username $credential.UserName `
         -Password $credential.Password `
+        -Domain $NXDomain `
         -TokenRefreshMinutes $TokenRefreshMinutes `
         -TrustAllCertificates:$TrustAllCertificates
 }
@@ -412,7 +417,7 @@ catch {
     exit 1
 }
 
-Write-Log "Connected to $NXServer as $($session.Username)."
+Write-Log "Connected to $NXServer as $($session.Username) (domain $NXDomain)."
 
 $exitCode = 0
 try {
