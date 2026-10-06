@@ -38,26 +38,18 @@
     -TrustAllCertificates while testing and import the certificate into the
     trust store for production use.
 
-.PARAMETER Server
+.PARAMETER NXServer
     Host name or IP address of the Nexus Dashboard (the cluster's management
-    address).
+    address). The API is reached on HTTPS port 443.
 
-.PARAMETER Port
-    HTTPS port of the Nexus Dashboard API. 443 unless it was changed.
-
-.PARAMETER Username
-    The API user. Only used when -CredentialPath is not given: it is the
-    name pre-filled in the credential prompt.
-
-.PARAMETER Domain
-    Login domain. "DefaultAuth" is the local user database; for a remote
-    (RADIUS/TACACS/LDAP) user pass the login domain name configured in ND.
-
-.PARAMETER CredentialPath
+.PARAMETER NXCredentialPath
     Path to a credential saved with Export-Clixml, for unattended runs
-    (scheduled task). Without it the script prompts for the password.
-    Create the file once, as the account the task runs under:
-        Get-Credential | Export-Clixml -Path .\Credentials\NexusDashboardCredential.xml
+    (scheduled task). Pass an empty string to be prompted instead. Create
+    the file once, as the account the task runs under:
+        Get-Credential | Export-Clixml -Path D:\SolarWindsScripts\PowerShell\Credentials\NexusDashboard_Credential.xml
+
+    The user logs in to the local user database (DefaultAuth); a remote
+    RADIUS/TACACS/LDAP user needs -Domain on Connect-NexusDashboard.
 
 .PARAMETER TrustAllCertificates
     Accept the self-signed certificate of the Nexus Dashboard. Meant for
@@ -88,30 +80,21 @@
     instead.
 
 .EXAMPLE
-    .\NexusDashboard.Connect.ps1 -Server nd.example.local -TrustAllCertificates
+    .\NexusDashboard.Connect.ps1 -NXServer nd.example.local -TrustAllCertificates
 
-    Prompts for the password of "admin" and prints the cluster nodes and the
-    switch inventory.
+    Reads the credential from the default -NXCredentialPath and prints the
+    cluster nodes and the switch inventory.
 
 .EXAMPLE
-    .\NexusDashboard.Connect.ps1 -Server nd.example.local -Domain RadiusDomain `
-        -CredentialPath .\Credentials\NexusDashboardCredential.xml
+    .\NexusDashboard.Connect.ps1 -NXServer nd.example.local -NXCredentialPath ''
 
-    Unattended run as a RADIUS user, with the credential read from a file.
+    Prompts for the credential instead of reading it from a file.
 #>
 
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Server,
-
-    [ValidateRange(1, 65535)]
-    [int]$Port = 443,
-
-    [string]$Username = "admin",
-
-    [string]$Domain = "DefaultAuth",
-
-    [string]$CredentialPath = "",
+    # --- Cisco Nexus Dashboard connection ---
+    [string]$NXServer = "1.1.1.1",
+    [string]$NXCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\FMC_Credential.xml",
 
     [switch]$TrustAllCertificates,
 
@@ -400,12 +383,12 @@ Write-Log "===== Run started ====="
 # A saved credential for unattended runs, otherwise a prompt that keeps the
 # password as a SecureString.
 try {
-    if ($CredentialPath) {
-        $credential = Import-Clixml -Path $CredentialPath -ErrorAction Stop
-        Write-Log "Credential read from $CredentialPath."
+    if ($NXCredentialPath) {
+        $credential = Import-Clixml -Path $NXCredentialPath -ErrorAction Stop
+        Write-Log "Credential read from $NXCredentialPath."
     }
     else {
-        $credential = Get-Credential -UserName $Username -Message "Nexus Dashboard API credentials"
+        $credential = Get-Credential -Message "Nexus Dashboard API credentials"
     }
 }
 catch {
@@ -418,10 +401,9 @@ if (-not $credential) {
 }
 
 try {
-    $session = Connect-NexusDashboard -Server $Server -Port $Port `
+    $session = Connect-NexusDashboard -Server $NXServer `
         -Username $credential.UserName `
         -Password $credential.Password `
-        -Domain $Domain `
         -TokenRefreshMinutes $TokenRefreshMinutes `
         -TrustAllCertificates:$TrustAllCertificates
 }
@@ -430,7 +412,7 @@ catch {
     exit 1
 }
 
-Write-Log "Connected to $Server as $($session.Username) (domain $Domain)."
+Write-Log "Connected to $NXServer as $($session.Username)."
 
 $exitCode = 0
 try {
