@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
 .SYNOPSIS
     Cisco Nexus Dashboard REST API - connect, read the switch inventory and
@@ -20,16 +22,21 @@
           same way DNA.DiscoverNodesAndInterfaces.ps1 does it for Cisco DNA
           Center;
     o logs out (POST /logout) in a finally block, so the token is revoked
-      even when a request fails.
+      even when a request fails;
+    o records every run in a log file - the login, each request, every
+      cluster node and switch returned, and any failure - bounded by
+      size-based rotation, the same way DNA.DiscoverNodesAndInterfaces.ps1
+      bounds its own log.
 
     The functions - Connect-NexusDashboard, Update-NexusDashboardToken,
     Invoke-NexusDashboardApi and Disconnect-NexusDashboard - are written to
     be reused unchanged by the discovery script that builds on this one.
 
-    Works on Windows PowerShell 5.1 and PowerShell 7+. Nexus Dashboard ships
-    with a self-signed certificate, so use -TrustAllCertificates while
-    testing and import the certificate into the trust store for production
-    use.
+    Requires PowerShell 7+ for the -SkipCertificateCheck switch on
+    Invoke-RestMethod, like the DNA, FMC and Check Point scripts. Nexus
+    Dashboard ships with a self-signed certificate, so use
+    -TrustAllCertificates while testing and import the certificate into the
+    trust store for production use.
 
 .PARAMETER Server
     Host name or IP address of the Nexus Dashboard (the cluster's management
@@ -66,6 +73,20 @@
     inventory. Use it when the Fabric Controller service is not installed on
     this Nexus Dashboard - the inventory request fails without it.
 
+.PARAMETER LogPath
+    The log file this script writes to. It is bounded by rotation rather
+    than by age, the same way DNA.DiscoverNodesAndInterfaces.ps1 bounds its
+    own log.
+
+.PARAMETER LogMaxBytes
+    The size at which the log is rotated. Rotation keeps LogKeep older
+    generations beside it, so the space the logging can occupy is bounded at
+    roughly LogMaxBytes times LogKeep plus one.
+
+.PARAMETER LogKeep
+    How many rotated logs to keep. Zero keeps none: the log starts over
+    instead.
+
 .EXAMPLE
     .\NexusDashboard.Connect.ps1 -Server nd.example.local -TrustAllCertificates
 
@@ -97,28 +118,99 @@ param(
     [ValidateRange(1, 19)]
     [int]$TokenRefreshMinutes = 15,
 
-    [switch]$SkipSwitchInventory
+    [switch]$SkipSwitchInventory,
+
+    [string] $LogPath = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\nexusdashboard-connect.log'),
+
+    [ValidateRange(4KB, 100MB)]
+    [int] $LogMaxBytes = 1MB,
+
+    [ValidateRange(0, 20)]
+    [int] $LogKeep = 3
 )
 
-function Set-NexusDashboardCertificatePolicy {
-    # PowerShell 5.1 has no -SkipCertificateCheck on Invoke-RestMethod, so the
-    # validation callback has to be relaxed process wide instead.
-    if ($PSVersionTable.PSVersion.Major -ge 6) { return }
+# --- Logging ---
+# Taken from DNA.DiscoverNodesAndInterfaces.ps1: one log file bounded by
+# size-based rotation, the same level set and line format, and the same lazy
+# creation of the log directory on first write. The file calls carry
+# -ErrorAction Stop of their own, since this script does not set
+# $ErrorActionPreference = 'Stop'; without it a failed write escapes the
+# catch as a raw error instead of the intended warning.
 
-    if (-not ("NexusDashboardTrustAllCertsPolicy" -as [type])) {
-        Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class NexusDashboardTrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) {
-        return true;
+function Invoke-LogRotation {
+    # Renames the log out of the way once it reaches -LogMaxBytes, keeping
+    # -LogKeep older generations: .log -> .log.1, .log.1 -> .log.2, and so on,
+    # with the oldest dropped. Run on a schedule the log would otherwise grow
+    # without bound.
+    param(
+        [Parameter(Mandatory)][string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ((Get-Item -LiteralPath $Path).Length -lt $script:LogMaxBytes) { return }
+
+    # Nothing to keep: the log simply starts over.
+    if ($script:LogKeep -lt 1) {
+        Remove-Item -LiteralPath $Path -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+        return
     }
+
+    # Oldest generation falls off the end.
+    $oldest = "$Path.$($script:LogKeep)"
+    if (Test-Path -LiteralPath $oldest) {
+        Remove-Item -LiteralPath $oldest -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+    }
+
+    # Shift the rest down, highest first so nothing is overwritten on the way.
+    for ($i = $script:LogKeep - 1; $i -ge 1; $i--) {
+        $from = "$Path.$i"
+        if (Test-Path -LiteralPath $from) {
+            Move-Item -LiteralPath $from -Destination "$Path.$($i + 1)" -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
+        }
+    }
+
+    Move-Item -LiteralPath $Path -Destination "$Path.1" -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop
 }
-"@
+
+function Write-Log {
+    <#
+    .SYNOPSIS
+        Record one line in the run log, and on the console unless suppressed
+    .PARAMETER NoConsole
+        Write to the log file only. Used for the per-item detail lines - every
+        cluster node and switch - which belong in the record but would bury
+        the console output.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Message,
+
+        [ValidateSet('INFO', 'WARN', 'ERROR')]
+        [string] $Level = 'INFO',
+
+        [switch] $NoConsole
+    )
+
+    $line = '{0:yyyy-MM-dd HH:mm:ss} [{1,-5}] {2}' -f (Get-Date), $Level, $Message
+    if (-not $NoConsole) {
+        Write-Information -MessageData $line -InformationAction Continue
     }
 
-    [System.Net.ServicePointManager]::CertificatePolicy = New-Object NexusDashboardTrustAllCertsPolicy
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    # -WhatIf:$false so that the log keeps being written even if a caller
+    # passes -WhatIf through; the log is a record, never one of the changes
+    # being previewed.
+    try {
+        $directory = Split-Path -Path $script:LogPath -Parent
+        if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+            New-Item -Path $directory -ItemType Directory -Force -WhatIf:$false -Confirm:$false -ErrorAction Stop | Out-Null
+        }
+        Invoke-LogRotation -Path $script:LogPath
+        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -WhatIf:$false -Confirm:$false -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Could not write to the log file '$script:LogPath': $($_.Exception.Message)"
+    }
 }
 
 function Get-NexusDashboardErrorMessage {
@@ -154,8 +246,6 @@ function Connect-NexusDashboard {
         [int]$TokenRefreshMinutes = 15
     )
 
-    if ($TrustAllCertificates) { Set-NexusDashboardCertificatePolicy }
-
     # PtrToStringBSTR (rather than PtrToStringAuto) decodes the BSTR as UTF-16 on
     # every platform, and the buffer is zeroed again right after it is read.
     $passwordPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
@@ -181,7 +271,7 @@ function Connect-NexusDashboard {
         ContentType     = "application/json"
         SessionVariable = "webSession"
     }
-    if ($TrustAllCertificates -and $PSVersionTable.PSVersion.Major -ge 6) {
+    if ($TrustAllCertificates) {
         $params["SkipCertificateCheck"] = $true
     }
 
@@ -232,7 +322,7 @@ function Update-NexusDashboardToken {
         Headers     = @{ "Authorization" = "Bearer $($Session.Token)" }
         ContentType = "application/json"
     }
-    if ($Session.TrustAllCertificates -and $PSVersionTable.PSVersion.Major -ge 6) {
+    if ($Session.TrustAllCertificates) {
         $params["SkipCertificateCheck"] = $true
     }
 
@@ -263,6 +353,7 @@ function Invoke-NexusDashboardApi {
 
     if (((Get-Date) - $Session.IssuedAt).TotalMinutes -ge $Session.TokenRefreshMinutes) {
         Update-NexusDashboardToken -Session $Session
+        Write-Log "Token refreshed on $($Session.Server)."
     }
 
     $params = @{
@@ -274,7 +365,7 @@ function Invoke-NexusDashboardApi {
         $params["Body"] = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 10 }
         $params["ContentType"] = "application/json"
     }
-    if ($Session.TrustAllCertificates -and $PSVersionTable.PSVersion.Major -ge 6) {
+    if ($Session.TrustAllCertificates) {
         $params["SkipCertificateCheck"] = $true
     }
 
@@ -295,70 +386,119 @@ function Disconnect-NexusDashboard {
     # until it expires. A failure here is not worth failing the run over.
     try {
         Invoke-NexusDashboardApi -Session $Session -Path "/logout" -Method Post | Out-Null
+        Write-Log "Logged out of $($Session.Server)."
     }
     catch {
-        Write-Warning "Logout from $($Session.Server) failed: $($_.Exception.Message)"
+        Write-Log "Logout from $($Session.Server) failed: $($_.Exception.Message)" -Level WARN
     }
 }
 
 # --- Main --------------------------------------------------------------------
 
+Write-Log "===== Run started ====="
+
 # A saved credential for unattended runs, otherwise a prompt that keeps the
 # password as a SecureString.
-if ($CredentialPath) {
-    $credential = Import-Clixml -Path $CredentialPath
+try {
+    if ($CredentialPath) {
+        $credential = Import-Clixml -Path $CredentialPath -ErrorAction Stop
+        Write-Log "Credential read from $CredentialPath."
+    }
+    else {
+        $credential = Get-Credential -UserName $Username -Message "Nexus Dashboard API credentials"
+    }
 }
-else {
-    $credential = Get-Credential -UserName $Username -Message "Nexus Dashboard API credentials"
+catch {
+    Write-Log "Failed to read the credential: $($_.Exception.Message)" -Level ERROR
+    exit 1
+}
+if (-not $credential) {
+    Write-Log "No credential was given - nothing to do." -Level ERROR
+    exit 1
 }
 
-$session = Connect-NexusDashboard -Server $Server -Port $Port `
-    -Username $credential.UserName `
-    -Password $credential.Password `
-    -Domain $Domain `
-    -TokenRefreshMinutes $TokenRefreshMinutes `
-    -TrustAllCertificates:$TrustAllCertificates
+try {
+    $session = Connect-NexusDashboard -Server $Server -Port $Port `
+        -Username $credential.UserName `
+        -Password $credential.Password `
+        -Domain $Domain `
+        -TokenRefreshMinutes $TokenRefreshMinutes `
+        -TrustAllCertificates:$TrustAllCertificates
+}
+catch {
+    Write-Log $_.Exception.Message -Level ERROR
+    exit 1
+}
 
-Write-Host "Connected to $Server as $($session.Username)"
+Write-Log "Connected to $Server as $($session.Username) (domain $Domain)."
 
+$exitCode = 0
 try {
     # Read-only call that proves the session works: the nodes that make up the
     # Nexus Dashboard cluster itself.
-    $clusterNodes = Invoke-NexusDashboardApi -Session $session -Path "/nexus/infra/api/platform/v1/nodes"
+    $clusterNodes = @(
+        (Invoke-NexusDashboardApi -Session $session -Path "/nexus/infra/api/platform/v1/nodes").items |
+            Where-Object { $_ } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Name   = $_.spec.name
+                    Serial = $_.spec.serialNumber
+                    Role   = $_.spec.role
+                    State  = $_.status.nodeState
+                }
+            }
+    )
 
-    Write-Host "Nexus Dashboard cluster nodes:"
-    $clusterNodes.items | ForEach-Object {
-        [pscustomobject]@{
-            Name   = $_.spec.name
-            Serial = $_.spec.serialNumber
-            Role   = $_.spec.role
-            State  = $_.status.nodeState
-        }
-    } | Format-Table -AutoSize | Out-String | Write-Host
+    Write-Log "Nexus Dashboard returned $($clusterNodes.Count) cluster node[s]."
+    foreach ($node in $clusterNodes) {
+        Write-Log "  cluster node    | name=$($node.Name) | serial=$($node.Serial) | role=$($node.Role) | state=$($node.State)" -NoConsole
+    }
+    $clusterNodes | Format-Table -AutoSize | Out-String | Write-Host
 
-    if (-not $SkipSwitchInventory) {
+    if ($SkipSwitchInventory) {
+        Write-Log "Switch inventory skipped (-SkipSwitchInventory)."
+    }
+    else {
         # The switch inventory managed by the Fabric Controller (NDFC) service on
         # this Nexus Dashboard. These are the components that the next step adds to
         # SolarWinds as nodes, by their management IP address.
-        $switches = Invoke-NexusDashboardApi -Session $session `
+        #
+        # The response is a JSON array; @() unrolls it whether it arrives as one
+        # array object or one switch at a time.
+        $rawSwitches = Invoke-NexusDashboardApi -Session $session `
             -Path "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/inventory/allswitches"
+        $switches = @(
+            @($rawSwitches) |
+                Where-Object { $_ } |
+                ForEach-Object {
+                    [pscustomobject]@{
+                        Name      = $_.logicalName
+                        IPAddress = $_.ipAddress
+                        Model     = $_.model
+                        Serial    = $_.serialNumber
+                        Fabric    = $_.fabricName
+                        Role      = $_.switchRole
+                        Version   = $_.release
+                        Status    = $_.status
+                    }
+                }
+        )
 
-        Write-Host "Switches managed by Nexus Dashboard Fabric Controller:"
-        $switches | ForEach-Object {
-            [pscustomobject]@{
-                Name      = $_.logicalName
-                IPAddress = $_.ipAddress
-                Model     = $_.model
-                Serial    = $_.serialNumber
-                Fabric    = $_.fabricName
-                Role      = $_.switchRole
-                Version   = $_.release
-                Status    = $_.status
-            }
-        } | Format-Table -AutoSize | Out-String | Write-Host
+        $withIp = @($switches | Where-Object { $_.IPAddress }).Count
+        Write-Log "Fabric Controller returned $($switches.Count) switch[es], $withIp with a management IP address."
+        foreach ($device in $switches) {
+            Write-Log "  switch          | name=$($device.Name) | IP=$($device.IPAddress) | model=$($device.Model) | serial=$($device.Serial) | fabric=$($device.Fabric) | status=$($device.Status)" -NoConsole
+        }
+        $switches | Format-Table -AutoSize | Out-String | Write-Host
     }
+}
+catch {
+    Write-Log $_.Exception.Message -Level ERROR
+    $exitCode = 1
 }
 finally {
     Disconnect-NexusDashboard -Session $session
-    Write-Host "Session closed."
+    Write-Log "=== Run finished ===" -NoConsole
 }
+
+exit $exitCode
