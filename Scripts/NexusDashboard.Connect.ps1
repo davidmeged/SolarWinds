@@ -44,7 +44,7 @@
 
 .PARAMETER NXServer
     Host name or IP address of the Nexus Dashboard (the cluster's management
-    address). The API is reached on HTTPS port 443.
+    address). The API is reached on the default HTTPS port (443).
 
 .PARAMETER NXCredentialPath
     Path to a credential saved with Export-Clixml, for unattended runs
@@ -256,7 +256,6 @@ function Get-NexusDashboardErrorMessage {
 function Connect-NexusDashboard {
     param(
         [Parameter(Mandatory = $true)] [string]$Server,
-        [int]$Port = 443,
         [Parameter(Mandatory = $true)] [string]$Username,
         [Parameter(Mandatory = $true)] [System.Security.SecureString]$Password,
         # Login domain. "DefaultAuth" is the local user database; for a remote
@@ -278,7 +277,7 @@ function Connect-NexusDashboard {
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr)
     }
 
-    $baseUri = "https://${Server}:${Port}"
+    $baseUri = "https://$Server"
 
     $body = @{
         userName   = $Username
@@ -320,7 +319,6 @@ function Connect-NexusDashboard {
 
     [pscustomobject]@{
         Server               = $Server
-        Port                 = $Port
         BaseUri              = $baseUri
         Username             = $Username
         Token                = $token
