@@ -30,6 +30,11 @@ LISTINGS = [
     ("DNS.SetSolarWindsRecordToActiveServer.ps1",
      "PowerShell script - no load balancer and no SNMP. It is told which SolarWinds server has "
      "become active and points the DNS record straight at it."),
+    ("NexusDashboard.Connect.ps1",
+     "PowerShell script - reads the switches managed by Cisco Nexus Dashboard (Fabric "
+     "Controller) over its REST API, logging in through the TACACS login domain, and adds "
+     "them to SolarWinds as nodes with their pollers and interfaces, the way "
+     "DNA.DiscoverNodesAndInterfaces.ps1 does it for Cisco DNA Center. Every run is logged."),
 ]
 
 CSS = """
