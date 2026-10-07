@@ -404,13 +404,39 @@ function Disconnect-NexusDashboard {
 
     # Logging out invalidates the token right away instead of leaving it valid
     # until it expires. A failure here is not worth failing the run over.
-    try {
-        Invoke-NexusDashboardApi -Session $Session -Path "/logout" -Method Post | Out-Null
-        Write-Log "Logged out of $($Session.Server)."
+    #
+    # Nexus Dashboard 3.2 answers POST /logout with 405 (Method Not Allowed),
+    # so GET is tried next. If neither is accepted there is nothing more to
+    # do: the token simply expires on its own after the ND session timeout
+    # (20 minutes by default), the same way the DNA token is left to expire.
+    foreach ($method in @("Post", "Get")) {
+        $params = @{
+            Uri     = "$($Session.BaseUri)/logout"
+            Method  = $method
+            Headers = @{ "Authorization" = "Bearer $($Session.Token)" }
+        }
+        if ($Session.TrustAllCertificates) {
+            $params["SkipCertificateCheck"] = $true
+        }
+
+        try {
+            Invoke-RestMethod @params | Out-Null
+            Write-Log "Logged out of $($Session.Server) ($($method.ToUpper()) /logout)."
+            return
+        }
+        catch {
+            $status = $null
+            if ($_.Exception.Response) {
+                $status = [int]$_.Exception.Response.StatusCode
+            }
+            if ($status -eq 405) { continue }
+
+            Write-Log "Logout from $($Session.Server) failed: $(Get-NexusDashboardErrorMessage -ErrorRecord $_)" -Level WARN
+            return
+        }
     }
-    catch {
-        Write-Log "Logout from $($Session.Server) failed: $($_.Exception.Message)" -Level WARN
-    }
+
+    Write-Log "Nexus Dashboard on $($Session.Server) accepts no logout request - the token is left to expire on its own."
 }
 
 # --- Function: Read the switch inventory from Nexus Dashboard ---
