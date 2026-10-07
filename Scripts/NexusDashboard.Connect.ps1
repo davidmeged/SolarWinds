@@ -58,10 +58,6 @@
     (Admin > Authentication > Login Domains) exactly, case included. Use
     "DefaultAuth" for a user from the local ND user database.
 
-.PARAMETER TrustAllCertificates
-    Accept the self-signed certificate of the Nexus Dashboard. Meant for
-    testing; import the certificate into the trust store for production.
-
 .PARAMETER TokenRefreshMinutes
     Age, in minutes, after which the ND token is renewed before the next
     call. Must stay below the token lifetime configured in ND (20 minutes by
@@ -113,11 +109,17 @@
 
 .EXAMPLE
     .\NexusDashboard.Connect.ps1 -NXServer nd.example.local -SwisHost orion.example.local `
-        -SNMPCommunity "mycommunity" -TrustAllCertificates
+        -SNMPCommunity "mycommunity"
 
 .NOTES
     Requires PowerShell 7+ for the -SkipCertificateCheck switch on
     Invoke-RestMethod, and the SwisPowerShell module for Connect-Swis.
+
+    The certificate of the Nexus Dashboard is not validated: ND ships with a
+    self-signed certificate, so Connect-NexusDashboard is always called with
+    -TrustAllCertificates, the same way FMC.DiscoverNodes.ps1 calls
+    Connect-Fmc. Once ND carries a certificate the server trusts, drop that
+    switch from the call so the certificate is checked again.
 #>
 
 param(
@@ -125,8 +127,6 @@ param(
     [string]$NXServer = "1.1.1.1",
     [string]$NXCredentialPath = "D:\SolarWindsScripts\PowerShell\Credentials\FMC_Credential.xml",
     [string]$NXDomain = "TACACS",
-
-    [switch]$TrustAllCertificates,
 
     [ValidateRange(1, 19)]
     [int]$TokenRefreshMinutes = 15,
@@ -509,7 +509,7 @@ try {
         -Password $ndCredential.Password `
         -Domain $NXDomain `
         -TokenRefreshMinutes $TokenRefreshMinutes `
-        -TrustAllCertificates:$TrustAllCertificates
+        -TrustAllCertificates
     Write-Log "Connected to Nexus Dashboard $NXServer as $($ndSession.Username) (domain $NXDomain)."
 } catch {
     Write-Log "Failed to authenticate with Nexus Dashboard: $($_.Exception.Message)" -Level ERROR
