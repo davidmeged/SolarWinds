@@ -652,13 +652,6 @@ function Add-DiscoveredInterfaces {
         return
     }
 
-    # Keep only the interfaces that are operationally up (ifOperStatus 1).
-    # Radware devices name their ports per family and per model - Alteon
-    # reports its data ports and trunks, DefensePro its G ports - so unlike
-    # the Cisco script there is no caption allow-list here. Add one on the
-    # same line to narrow the set further, for example:
-    #   $_.Caption.InnerText -notmatch '^(Port|trunk)' -or $_.ifOperStatus -ne '1'
-    #
     # The node list is materialised with @() first: RemoveChild shrinks the
     # live XmlNodeList, and removing from it while the pipeline is still
     # enumerating it skips nodes.
