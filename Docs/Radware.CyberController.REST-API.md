@@ -93,8 +93,9 @@ script finishes so sessions are not leaked.
 | Alerts (Alert Browser content) | `/mgmt/system/alerts/...` reporting endpoints - see the "security and operational alerts" support answer above |
 
 Endpoint names differ per version; the two authentication endpoints are the
-stable part of the API and are what `Scripts/Radware.CyberController.Connect.ps1`
-implements.
+stable part of the API. `Scripts/Radware.CyberController.DiscoverNodes.ps1`
+uses them together with the device inventory endpoint to add the managed
+devices to SolarWinds as nodes.
 
 ## Permissions
 

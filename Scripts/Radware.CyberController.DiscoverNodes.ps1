@@ -106,12 +106,12 @@
     instead.
 
 .EXAMPLE
-    .\Radware.CyberController.Connect.ps1
+    .\Radware.CyberController.DiscoverNodes.ps1
 
     Runs with the defaults set in the param block.
 
 .EXAMPLE
-    .\Radware.CyberController.Connect.ps1 -CyberControllerServer cc.example.com -DeviceType Alteon -SwisHost orion.example.com -SNMPCommunity "mycommunity"
+    .\Radware.CyberController.DiscoverNodes.ps1 -CyberControllerServer cc.example.com -DeviceType Alteon -SwisHost orion.example.com -SNMPCommunity "mycommunity"
 
 .NOTES
     Runs on Windows PowerShell 5.1 and PowerShell 7+: on 5.1 the certificate
