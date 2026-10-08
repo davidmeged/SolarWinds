@@ -241,7 +241,7 @@ function Get-SmartConsoleAddresses {
 
         foreach ($object in $responseJson.objects) {
             $results += [pscustomobject]@{
-                Name      = $object.name
+                Caption   = $object.name
                 IPAddress = $object.$IpField
             }
         }
@@ -270,15 +270,15 @@ function Add-Component {
     param($component)
 
     $newNodeProps = @{
-        IPAddress     = $component.IPAddress
-        Caption       = $component.Name
-        EngineID      = $component.EngineID
+        IPAddress       = $component.IPAddress
+        EngineID        = $component.EngineID
+        Caption         = $component.Caption
         # SNMP v2 specific
-        ObjectSubType = "SNMP"
-        SNMPVersion   = $component.SNMPVersion
-        DNS           = $component.DNS
-        SysName       = $component.SysName
-        Community     = $component.Community
+        ObjectSubType   = "SNMP"
+        SNMPVersion     = $component.SNMPVersion
+        DNS             = $component.DNS
+        SysName         = $component.SysName
+        Community       = $component.Community
         # === default values ===
         # EntityType    = 'Orion.Nodes'
         # DynamicIP     = $false
@@ -323,22 +323,53 @@ function Add-DiscoveredInterfaces {
         return
     }
 
-    $discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object {
+    # Keep only interfaces that are NOT loopback/bond/VLAN sub-interfaces and
+    # are operationally up (ifOperStatus 1). Everything else is removed
+    # before the add.
+    #
+    # The node list is materialised with @() first: RemoveChild shrinks the
+    # live XmlNodeList, and removing from it while the pipeline is still
+    # enumerating it skips nodes.
+    @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface) | Where-Object {
         $_.Caption.InnerText -match 'bond\d+\.\d+' -or
         $_.Caption.InnerText -match '\blo\b' -or
         $_.Caption.InnerText -match '\bpimreg\b' -or
         $_.Caption.InnerText -match 'eth\d+\.\d+' -or
         $_.Caption.InnerText -match 'eth\d+-\d+\.\d+' -or
         $_.ifOperStatus -match '2'
-    } | ForEach-Object { $discovered.DiscoveredInterfaces.RemoveChild($_) } | Out-Null
+    } | ForEach-Object { $discovered.DiscoveredInterfaces.RemoveChild($_) | Out-Null }
 
-    $interfaceCount = $discovered.DiscoveredInterfaces.DiscoveredLiteInterface.Count
+    # Where-Object drops the $null left once every interface was removed -
+    # @($null).Count is 1, which would report one interface and add none.
+    $interfaceCount = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object { $_ }).Count
 
-    # Add the remaining interfaces
+    if ($interfaceCount -eq 0) {
+        Write-Log " No interfaces left to add for node $($nodeId) after filtering." -Color DarkBlue
+        return
+    }
+
+    # Add the remaining interfaces. The node's interfaces are read before and
+    # after the add, so the log names exactly the interfaces that were added
+    # and not the ones that were already monitored.
+    $interfaceQuery = "SELECT InterfaceID, Caption FROM Orion.NPM.Interfaces WHERE NodeID = @nodeId"
     try {
+        $before = @(Get-SwisData -SwisConnection $swis -Query $interfaceQuery -Parameters @{ nodeId = $nodeId } | ForEach-Object { $_.InterfaceID })
+
         Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-        Write-Log " Added $interfaceCount interface[s] for node $($nodeId)." -Color Green
-        $script:interfaceTotal += $interfaceCount
+
+        $added = @(Get-SwisData -SwisConnection $swis -Query $interfaceQuery -Parameters @{ nodeId = $nodeId } |
+            Where-Object { $before -notcontains $_.InterfaceID })
+
+        if ($added.Count -eq 0) {
+            Write-Log " No new interfaces for node $($nodeId) - the $interfaceCount matching interface[s] were already monitored." -Color DarkBlue
+            return
+        }
+
+        foreach ($interface in $added) {
+            Write-Log "  Added interface $($interface.Caption) [InterfaceID $($interface.InterfaceID)] to node $nodeId." -Color Green
+        }
+        Write-Log " Added $($added.Count) interface[s] for node $($nodeId)." -Color Green
+        $script:interfaceTotal += $added.Count
     } catch {
         Write-Log " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -Level ERROR
     }
@@ -406,10 +437,10 @@ Write-Log "SmartConsole returned $($allAddresses.Count) gateway/cluster member a
 # --- Build the list of components to process ---
 $components = $allAddresses |
     Where-Object { $_.IPAddress } |
-    Select-Object -Unique -Property Name, IPAddress |
+    Select-Object -Unique -Property Caption, IPAddress |
     ForEach-Object {
         @{
-            Name        = $_.Name
+            Caption     = $_.Caption
             IPAddress   = $_.IPAddress
             EngineID    = $EngineID
             SNMPVersion = $SNMPVersion
@@ -435,7 +466,7 @@ try {
 
 # --- Main Loop: Process each component ---
 foreach ($component in $components) {
-    Write-Log "Processing component $($component.Name) ($($component.IPAddress))..."
+    Write-Log "Processing component $($component.Caption) ($($component.IPAddress))..."
 
     try {
         # Check if node already exists
@@ -443,12 +474,12 @@ foreach ($component in $components) {
 
         if ($existing) {
             $nodeId = @($existing)[0]
-            Write-Log " Node already exists: $($component.Name) ($($component.IPAddress)) [NodeID $nodeId], skipping add." -Color DarkBlue
+            Write-Log " Node already exists: $($component.Caption) ($($component.IPAddress)) [NodeID $nodeId], skipping add." -Color DarkBlue
             $existingCount++
         }
         else {
             $nodeId = Add-Component $component
-            Write-Log " Added node: $($component.Name) ($($component.IPAddress)) [NodeID $nodeId]." -Color Green
+            Write-Log " Added node: $($component.Caption) ($($component.IPAddress)) [NodeID $nodeId]." -Color Green
             $addedCount++
         }
 
@@ -456,7 +487,7 @@ foreach ($component in $components) {
         Add-DiscoveredInterfaces $nodeId
 
     } catch {
-        Write-Log " Failed to process $($component.Name) ($($component.IPAddress)): $($_.Exception.Message)" -Level ERROR
+        Write-Log " Failed to process $($component.Caption) ($($component.IPAddress)): $($_.Exception.Message)" -Level ERROR
         $failedCount++
     }
 }
