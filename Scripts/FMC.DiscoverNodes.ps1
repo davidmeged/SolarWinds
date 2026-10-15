@@ -69,6 +69,20 @@
     Settings > SNMP). Without it the Details/Uptime pollers have nothing to
     poll.
 
+.PARAMETER UnDPNames
+    Universal Device Pollers (UnDP) to assign to every node, by their name
+    in the Universal Device Poller tool (Orion.NPM.CustomPollers.UniqueName).
+    Before a UnDP is assigned, the device is asked for the UnDP's OID with an
+    SNMP v2c GETNEXT - the same check as "Test" in the UnDP tool - and the
+    UnDP is assigned only when the device answers inside that OID. Nodes
+    that do not support it are logged and left without it. Only node UnDPs
+    are handled; interface UnDPs are skipped with a warning. Empty (the
+    default) assigns no UnDP.
+
+.PARAMETER UnDPCheckOnly
+    Run the UnDP support check and log which nodes support each UnDP, but
+    assign nothing.
+
 .PARAMETER LogPath
     The log file. Every run appends to it: each device that already existed
     or was added, every poller type registered on a new node, every
@@ -91,6 +105,11 @@
 .EXAMPLE
     .\FMC.DiscoverNodes.ps1 -FmcServer fmc.example.com -SwisHost orion.example.com -SNMPCommunity "mycommunity"
 
+.EXAMPLE
+    .\FMC.DiscoverNodes.ps1 -UnDPNames "ftdConnections","ftdVpnSessions" -UnDPCheckOnly
+
+    Logs which devices support the two UnDPs without assigning them.
+
 .NOTES
     Requires PowerShell 7+ for the -SkipCertificateCheck switch on
     Invoke-RestMethod / Invoke-WebRequest, and the SwisPowerShell module for
@@ -110,6 +129,10 @@ param(
     [int]$EngineID = 2,
     [int]$SNMPVersion = 2,
     [string]$SNMPCommunity = '',
+
+    # --- Universal Device Pollers (UnDP) ---
+    [string[]]$UnDPNames = @(),
+    [switch]$UnDPCheckOnly,
 
     # --- Log ---
     [string]$LogPath = (Join-Path -Path $env:ProgramData -ChildPath 'SolarWinds\fmc-discover-nodes.log'),
@@ -480,6 +503,9 @@ $addedCount      = 0
 $skippedCount    = 0
 $failedCount     = 0
 $interfaceTotal  = 0
+$undpAssigned    = 0
+$undpSupported   = 0
+$undpUnsupported = 0
 
 Write-Log "===== Run started: FMC $FmcServer -> SolarWinds $SwisHost ====="
 
@@ -521,6 +547,29 @@ try {
     Write-Log "Failed to connect to SWIS: $($_.Exception.Message)" -Level ERROR
     Stop-Sessions
     exit
+}
+
+# --- Load the UnDP definitions to assign ---
+# Each name in -UnDPNames is looked up once; a name that does not exist, or
+# that belongs to an interface UnDP, is logged and left out.
+$undps = @()
+foreach ($undpName in $UnDPNames) {
+    $definition = @(Get-SwisData -SwisConnection $swis -Query "SELECT CustomPollerID, UniqueName, OID, NetObjectPrefix FROM Orion.NPM.CustomPollers WHERE UniqueName = @name" -Parameters @{ name = $undpName })[0]
+
+    if (-not $definition) {
+        Write-Log "UnDP '$undpName' was not found in SolarWinds - it will not be assigned." -Level WARN
+        continue
+    }
+    if ($definition.NetObjectPrefix -ne 'N') {
+        Write-Log "UnDP '$undpName' is an interface poller - only node UnDPs are assigned, skipping it." -Level WARN
+        continue
+    }
+
+    Write-Log "UnDP '$($definition.UniqueName)' loaded (OID $($definition.OID))."
+    $undps += $definition
+}
+if ($UnDPCheckOnly -and $undps) {
+    Write-Log "UnDPCheckOnly is set - UnDP support is checked and logged, nothing is assigned."
 }
 
 # --- Build the list of components to process ---
@@ -653,6 +702,282 @@ function Add-DiscoveredInterfaces {
     }
 }
 
+# --- Function: Encode a BER (SNMP) length ---
+function ConvertTo-BerLength {
+    param([int]$Length)
+
+    if ($Length -lt 0x80) {
+        return ,[byte[]]@($Length)
+    }
+
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    while ($Length -gt 0) {
+        $bytes.Insert(0, [byte]($Length -band 0xFF))
+        $Length = $Length -shr 8
+    }
+    return ,[byte[]](@([byte](0x80 -bor $bytes.Count)) + $bytes.ToArray())
+}
+
+# --- Function: Encode a BER (SNMP) tag-length-value ---
+function New-BerTlv {
+    param([byte]$Tag, [byte[]]$Value = @())
+
+    return ,[byte[]](@($Tag) + (ConvertTo-BerLength $Value.Length) + $Value)
+}
+
+# --- Function: Encode a BER (SNMP) INTEGER ---
+function ConvertTo-BerInteger {
+    param([int]$Value)
+
+    $bytes = [System.BitConverter]::GetBytes($Value)
+    [array]::Reverse($bytes)
+
+    # Drop the leading bytes that only repeat the sign.
+    $i = 0
+    while ($i -lt 3 -and (($bytes[$i] -eq 0x00 -and $bytes[$i + 1] -lt 0x80) -or
+                          ($bytes[$i] -eq 0xFF -and $bytes[$i + 1] -ge 0x80))) {
+        $i++
+    }
+    return ,(New-BerTlv 0x02 ([byte[]]$bytes[$i..3]))
+}
+
+# --- Function: Encode a BER (SNMP) OBJECT IDENTIFIER ---
+function ConvertTo-BerOid {
+    param([string]$Oid)
+
+    $arcs  = @($Oid.Trim('.').Split('.') | ForEach-Object { [uint64]$_ })
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    $bytes.Add([byte](40 * $arcs[0] + $arcs[1]))
+
+    for ($a = 2; $a -lt $arcs.Count; $a++) {
+        $arc   = $arcs[$a]
+        $chunk = [System.Collections.Generic.List[byte]]::new()
+        $chunk.Insert(0, [byte]($arc -band 0x7F))
+        $arc = $arc -shr 7
+        while ($arc -gt 0) {
+            $chunk.Insert(0, [byte](0x80 -bor ($arc -band 0x7F)))
+            $arc = $arc -shr 7
+        }
+        $bytes.AddRange($chunk)
+    }
+    return ,(New-BerTlv 0x06 $bytes.ToArray())
+}
+
+# --- Function: Read one BER (SNMP) tag-length-value ---
+function Read-BerTlv {
+    param([byte[]]$Data, [int]$Offset)
+
+    $tag    = $Data[$Offset]
+    $length = [int]$Data[$Offset + 1]
+    $start  = $Offset + 2
+
+    if ($length -band 0x80) {
+        $count  = $length -band 0x7F
+        $length = 0
+        for ($k = 0; $k -lt $count; $k++) {
+            $length = ($length -shl 8) -bor $Data[$start]
+            $start++
+        }
+    }
+
+    [pscustomobject]@{ Tag = $tag; Start = $start; Length = $length; Next = $start + $length }
+}
+
+# --- Function: Decode a BER (SNMP) INTEGER ---
+function ConvertFrom-BerInteger {
+    param([byte[]]$Data, [pscustomobject]$Tlv)
+
+    [long]$value = if ($Data[$Tlv.Start] -ge 0x80) { -1 } else { 0 }
+    for ($i = $Tlv.Start; $i -lt $Tlv.Next; $i++) {
+        $value = ($value -shl 8) -bor $Data[$i]
+    }
+    $value
+}
+
+# --- Function: Decode a BER (SNMP) OBJECT IDENTIFIER ---
+function ConvertFrom-BerOid {
+    param([byte[]]$Data, [pscustomobject]$Tlv)
+
+    $first = $Data[$Tlv.Start]
+    $arcs  = [System.Collections.Generic.List[uint64]]::new()
+    $arcs.Add([uint64][math]::Floor($first / 40))
+    $arcs.Add([uint64]($first % 40))
+
+    $value = [uint64]0
+    for ($i = $Tlv.Start + 1; $i -lt $Tlv.Next; $i++) {
+        $value = ($value -shl 7) -bor ($Data[$i] -band 0x7F)
+        if (-not ($Data[$i] -band 0x80)) {
+            $arcs.Add($value)
+            $value = [uint64]0
+        }
+    }
+    $arcs -join '.'
+}
+
+# --- Function: Send one SNMP v2c GETNEXT request ---
+function Invoke-SnmpGetNext {
+    <#
+    .SYNOPSIS
+        Ask a device for the object that follows an OID (SNMP v2c GETNEXT)
+    .DESCRIPTION
+        Built on a plain UDP socket so the script needs no SNMP module or
+        DLL. The request is sent from the host running the script - normally
+        the SolarWinds server, which already polls the devices over SNMP.
+    .OUTPUTS
+        ErrorStatus, Oid and ValueTag of the answer, or $null when the device
+        did not answer
+    #>
+    param(
+        [string]$IPAddress,
+        [string]$Community,
+        [string]$Oid,
+        [int]$Port = 161,
+        [int]$TimeoutMs = 2000,
+        [int]$Retries = 1
+    )
+
+    $requestId = Get-Random -Minimum 1 -Maximum 2147483647
+    $varbind   = New-BerTlv 0x30 ([byte[]]((ConvertTo-BerOid $Oid) + (New-BerTlv 0x05)))
+    $pdu       = New-BerTlv 0xA1 ([byte[]]((ConvertTo-BerInteger $requestId) + (ConvertTo-BerInteger 0) + (ConvertTo-BerInteger 0) + (New-BerTlv 0x30 $varbind)))
+    $message   = New-BerTlv 0x30 ([byte[]]((ConvertTo-BerInteger 1) + (New-BerTlv 0x04 ([System.Text.Encoding]::ASCII.GetBytes($Community))) + $pdu))
+
+    $udp = [System.Net.Sockets.UdpClient]::new()
+    try {
+        $udp.Client.ReceiveTimeout = $TimeoutMs
+        $udp.Connect($IPAddress, $Port)
+
+        for ($attempt = 0; $attempt -le $Retries; $attempt++) {
+            [void]$udp.Send($message, $message.Length)
+
+            try {
+                $remote   = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+                $response = $udp.Receive([ref]$remote)
+            } catch [System.Net.Sockets.SocketException] {
+                continue   # timed out - try again
+            }
+
+            # Message: version, community, Response-PDU (request-id,
+            # error-status, error-index, varbind list).
+            $msgTlv       = Read-BerTlv $response 0
+            $versionTlv   = Read-BerTlv $response $msgTlv.Start
+            $communityTlv = Read-BerTlv $response $versionTlv.Next
+            $pduTlv       = Read-BerTlv $response $communityTlv.Next
+            $ridTlv       = Read-BerTlv $response $pduTlv.Start
+            $errTlv       = Read-BerTlv $response $ridTlv.Next
+            $idxTlv       = Read-BerTlv $response $errTlv.Next
+            $vblTlv       = Read-BerTlv $response $idxTlv.Next
+            $vbTlv        = Read-BerTlv $response $vblTlv.Start
+            $oidTlv       = Read-BerTlv $response $vbTlv.Start
+            $valueTlv     = Read-BerTlv $response $oidTlv.Next
+
+            if ((ConvertFrom-BerInteger $response $ridTlv) -ne $requestId) {
+                continue   # an answer to an older request
+            }
+
+            return [pscustomobject]@{
+                ErrorStatus = ConvertFrom-BerInteger $response $errTlv
+                Oid         = ConvertFrom-BerOid $response $oidTlv
+                ValueTag    = $valueTlv.Tag
+            }
+        }
+    } finally {
+        $udp.Dispose()
+    }
+
+    $null
+}
+
+# --- Function: Check whether a device supports a UnDP ---
+function Test-UnDPSupport {
+    <#
+    .SYNOPSIS
+        Check that a device answers the OID a UnDP polls
+    .DESCRIPTION
+        A GETNEXT on the UnDP's OID returns the first object under it - the
+        .0 instance of a scalar or the first row of a table column. The
+        device supports the UnDP when that object is inside the OID; an
+        object outside it, or noSuchObject / noSuchInstance / endOfMibView,
+        means the device does not have it.
+    .OUTPUTS
+        Supported ($true/$false) and the Reason when it is not supported
+    #>
+    param(
+        [string]$IPAddress,
+        [string]$Community,
+        [string]$Oid
+    )
+
+    $base   = $Oid.Trim('.')
+    $answer = Invoke-SnmpGetNext -IPAddress $IPAddress -Community $Community -Oid $base
+
+    $reason = if (-not $answer) {
+        "no SNMP answer - check the community and that SNMP is enabled"
+    } elseif ($answer.ErrorStatus -ne 0) {
+        "SNMP error-status $($answer.ErrorStatus)"
+    } elseif ($answer.ValueTag -in 0x80, 0x81, 0x82) {
+        "the device does not have OID $base"
+    } elseif ($answer.Oid -ne $base -and -not $answer.Oid.StartsWith("$base.")) {
+        "the device does not have OID $base"
+    }
+
+    [pscustomobject]@{ Supported = -not $reason; Reason = $reason }
+}
+
+# --- Function: Assign the UnDPs a node supports ---
+function Add-UnDPPollers {
+    param($nodeId, $component)
+
+    if (-not $script:undps) {
+        return
+    }
+
+    # Test with the SNMP settings the node has in SolarWinds, so an existing
+    # node with its own community is tested the way Orion polls it.
+    $node = @(Get-SwisData -SwisConnection $swis -Query "SELECT SNMPVersion, Community FROM Orion.Nodes WHERE NodeID = @nodeId" -Parameters @{ nodeId = $nodeId })[0]
+
+    if ($node -and $node.SNMPVersion -eq 3) {
+        Write-Log " Node $nodeId polls with SNMPv3 - the UnDP check supports v2c only, no UnDP assigned." -Level WARN
+        return
+    }
+
+    $community = if ($node -and $node.Community) { $node.Community } else { $component.Community }
+
+    $assigned = @(Get-SwisData -SwisConnection $swis -Query "SELECT CustomPollerID FROM Orion.NPM.CustomPollerAssignmentOnNode WHERE NodeID = @nodeId" -Parameters @{ nodeId = $nodeId } |
+        ForEach-Object { "$_" })
+
+    foreach ($undp in $script:undps) {
+        if ($assigned -contains "$($undp.CustomPollerID)") {
+            Write-Log "  UnDP $($undp.UniqueName) is already assigned to node $nodeId." -Color DarkBlue
+            continue
+        }
+
+        try {
+            $test = Test-UnDPSupport -IPAddress $component.IPAddress -Community $community -Oid $undp.OID
+
+            if (-not $test.Supported) {
+                Write-Log "  UnDP $($undp.UniqueName) not supported on node $nodeId ($($test.Reason)) - not assigned." -Color DarkYellow
+                $script:undpUnsupported++
+                continue
+            }
+
+            if ($script:UnDPCheckOnly) {
+                Write-Log "  UnDP $($undp.UniqueName) supported on node $nodeId (check only - not assigned)." -Color Green
+                $script:undpSupported++
+                continue
+            }
+
+            New-SwisObject -SwisConnection $swis -EntityType "Orion.NPM.CustomPollerAssignmentOnNode" -Properties @{
+                NodeID         = $nodeId
+                CustomPollerID = $undp.CustomPollerID
+            } | Out-Null
+            Write-Log "  Assigned UnDP $($undp.UniqueName) to node $nodeId." -Color Green
+            $script:undpAssigned++
+        } catch {
+            Write-Log "  Failed to assign UnDP $($undp.UniqueName) to node $($nodeId): $($_.Exception.Message)" -Level ERROR
+        }
+    }
+}
+
 # --- Main Loop: Process each component ---
 foreach ($component in $components) {
     Write-Log "Processing component $($component.Caption) ($($component.IPAddress))..."
@@ -675,6 +1000,9 @@ foreach ($component in $components) {
         # Discover and add interfaces for the node (whether new or existing)
         Add-DiscoveredInterfaces $nodeId
 
+        # Assign the UnDPs the node supports (whether new or existing)
+        Add-UnDPPollers $nodeId $component
+
     } catch {
         Write-Log " Failed to process $($component.Caption) ($($component.IPAddress)): $($_.Exception.Message)" -Level ERROR
         $failedCount++
@@ -684,4 +1012,7 @@ foreach ($component in $components) {
 # --- End the FMC and SWIS sessions ---
 Stop-Sessions
 
+if ($undps) {
+    Write-Log "UnDP: $undpAssigned assigned, $undpSupported supported (check only), $undpUnsupported not supported."
+}
 Write-Log "===== Run completed: $addedCount node[s] added, $existingCount already existed, $skippedCount skipped, $failedCount failed, $interfaceTotal interface[s] added ====="
