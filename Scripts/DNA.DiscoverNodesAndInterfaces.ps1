@@ -362,10 +362,29 @@ function Add-Component {
     }
 
     foreach ($pollerType in @(
-        "N.Status.ICMP.Native",
-        "N.ResponseTime.ICMP.Native",
+        "N.Cpu.SNMP.CiscoGen3",
         "N.Details.SNMP.Generic",
-        "N.Uptime.SNMP.Generic"
+        "N.EnergyWise.SNMP.Cisco",
+        "N.Memory.SNMP.CiscoAsr",
+        "N.MulticastRouting.SNMP.MulticastRoutingTable",
+        "N.Poe.SNMP.Generic",
+        "N.ResponseTime.ICMP.Native",
+        "N.Routing.SNMP.InetCidrRoutingTable",
+        "N.Routing.SNMP.Ipv4CidrRoutingTable",
+        "N.RoutingNeighbor.SNMP.BGP",
+        "N.Status.ICMP.Native",
+        "N.SwitchStack.SNMP.Cisco",
+        "N.Topology_CDP.SNMP.cdpCatchTable",
+        "N.Topology_Layer2.SNMP.Dot1dTpFdb",
+        "N.Topology_Layer3.SNMP.ipNetToMedia"
+        "N.Topology_Layer3.SNMP.ipNetToPhysical",
+        "N.Topology_Layer3_IpRouting.SNMP.inetCidrRouter",
+        "N.Topology_Layer3_IpRouting.SNMP.ipCidrRouter",
+        "N.Topology_LLDP.SNMP.lldpRemoteSystemData",
+        "N.Topology_PortsMap.SNMP.Dot1dBase",
+        "N.Topology_Vlans.SNMP.VtpVlan",
+        "N.Uptime.SNMP.Generic",
+        "N.VRFRouting.SNMP.CiscoVrfMib"
     )) {
         $poller["PollerType"] = $pollerType
         New-SwisObject -SwisConnection $swis -EntityType "Orion.Pollers" -Properties $poller | Out-Null
