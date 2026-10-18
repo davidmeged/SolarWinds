@@ -403,26 +403,42 @@ function Add-DiscoveredInterfaces {
     # Where-Object drops the null that an emptied node list yields: @($null)
     # has a Count of 1, so without it a run that filtered every interface away
     # would report one interface and still call the add verb with nothing.
-    $keptInterfaces = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object { $_ })
-    $interfaceCount = $keptInterfaces.Count
+    $interfaceCount = @($discovered.DiscoveredInterfaces.DiscoveredLiteInterface | Where-Object { $_ }).Count
 
     if ($interfaceCount -eq 0) {
         Write-Log " No interfaces left to add for node $($nodeId) after filtering."
         return
     }
 
-    # Collect the captions before the add, so the log can name each interface
-    # rather than only count them.
-    $captions = @($keptInterfaces | ForEach-Object { $_.Caption.InnerText })
-
-    # Add the remaining interfaces
+    # Add the remaining interfaces. The node's interfaces are read before and
+    # after the add, so the log names exactly the interfaces that were added
+    # and leaves out the ones that were already monitored - discovery returns
+    # every matching interface on the device, monitored or not, so without the
+    # diff a re-run would log the same interfaces as "added" every time.
+    #
+    # The comparison is on InterfaceID, which is SolarWinds' own key, rather
+    # than on the caption; the caption is then taken from SolarWinds too, so
+    # the logged name is the one the interface actually carries in the system.
+    $interfaceQuery = "SELECT InterfaceID, Caption FROM Orion.NPM.Interfaces WHERE NodeID = @nodeId"
     try {
+        $before = @(Get-SwisData -SwisConnection $swis -Query $interfaceQuery -Parameters @{ nodeId = $nodeId } |
+            ForEach-Object { $_.InterfaceID })
+
         Invoke-SwisVerb $swis Orion.NPM.Interfaces AddInterfacesOnNode @($nodeId, $discovered.DiscoveredInterfaces, "AddDefaultPollers") | Out-Null
-        Write-Log " Added $interfaceCount interface[s] for node $($nodeId)."
-        foreach ($caption in $captions) {
-            Write-Log "  interface added | NodeID=$nodeId | caption=$caption" -NoConsole
+
+        $added = @(Get-SwisData -SwisConnection $swis -Query $interfaceQuery -Parameters @{ nodeId = $nodeId } |
+            Where-Object { $before -notcontains $_.InterfaceID })
+
+        if ($added.Count -eq 0) {
+            Write-Log " No new interfaces for node $($nodeId) - the $interfaceCount matching interface[s] were already monitored."
+            return
         }
-        $script:stats.InterfacesAdded += $interfaceCount
+
+        Write-Log " Added $($added.Count) interface[s] for node $($nodeId)."
+        foreach ($interface in $added) {
+            Write-Log "  interface added | NodeID=$nodeId | InterfaceID=$($interface.InterfaceID) | caption=$($interface.Caption)" -NoConsole
+        }
+        $script:stats.InterfacesAdded += $added.Count
     } catch {
         Write-Log " Failed to add interfaces for node $($nodeId): $($_.Exception.Message)" -Level ERROR
     }
