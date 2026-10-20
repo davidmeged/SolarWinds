@@ -1,38 +1,18 @@
-<#
-.SYNOPSIS
-    Removes the domain name from the Caption (display name) of nodes in SolarWinds Orion.
+# This script removes the domain name from the Caption (display name) of nodes in SolarWinds Orion.
+#
+# Changes only the Caption, e.g. "SRV01.corp.local" -> "SRV01" or "CORP\SRV01" -> "SRV01".
+# DNS, SysName and IP address are left untouched. Captions that are IP addresses are skipped.
+# Every change (old and new value) is written to a CSV log, which can be used to roll back.
+#
+# Edit the settings below and run the whole script (F5 in PowerShell ISE / VS Code).
+# Keep $DryRun = $true for the first run to see what would change without changing anything.
 
-.DESCRIPTION
-    Changes only the Caption, e.g. "SRV01.corp.local" -> "SRV01" or "CORP\SRV01" -> "SRV01".
-    DNS, SysName and IP address are left untouched. Captions that are IP addresses are skipped.
-    Every change (old and new value) is written to a CSV log, which can be used to roll back.
-
-.EXAMPLE
-    # Dry run - shows what would change without changing anything
-    .\CRUD.RemoveDomainFromNodeCaption.ps1 -OrionServer orion01 -WhatIf
-
-.EXAMPLE
-    # Strip only a specific domain, connecting as the current Windows user
-    .\CRUD.RemoveDomainFromNodeCaption.ps1 -OrionServer orion01 -Domain corp.local -Trusted
-#>
-[CmdletBinding(SupportsShouldProcess)]
-param(
-    [Parameter(Mandatory)]
-    [string]$OrionServer,
-
-    # Optional: strip only this domain (e.g. corp.local). Without it, everything after the first dot is removed
-    [string]$Domain,
-
-    [pscredential]$Credential,
-
-    # Connect as the current Windows user
-    [switch]$Trusted,
-
-    [string]$LogPath = ".\OrionCaptionChanges_$(Get-Date -Format yyyyMMdd_HHmmss).csv"
-)
-
-# $PSCmdlet only exists when this runs as a .ps1 file (not when pasted into the console or run with F8)
-if (-not $PSCmdlet) { throw "Run this as a .ps1 file, e.g. .\CRUD.RemoveDomainFromNodeCaption.ps1 -OrionServer <server> -WhatIf" }
+# === Settings ===
+$OrionServer    = "localhost"   # Orion server name (localhost when running on the Orion server itself)
+$UseWindowsAuth = $true         # $true = current Windows user, $false = prompt for Orion username/password
+$Domain         = ""            # e.g. "corp.local" to strip only this domain. Empty = remove everything after the first dot
+$DryRun         = $true         # $true = only show what would change, $false = apply the changes
+$LogPath        = "$env:USERPROFILE\Desktop\OrionCaptionChanges_$(Get-Date -Format yyyyMMdd_HHmmss).csv"
 
 # --- Load module ---
 if (-not (Get-Module -ListAvailable -Name SwisPowerShell)) {
@@ -42,12 +22,12 @@ if (-not (Get-Module -ListAvailable -Name SwisPowerShell)) {
 Import-Module SwisPowerShell
 
 # --- Connect to SWIS ---
-if ($Trusted) {
+if ($UseWindowsAuth) {
     $swis = Connect-Swis -Hostname $OrionServer -Trusted
 }
 else {
-    if (-not $Credential) { $Credential = Get-Credential -Message "Orion credentials" }
-    $swis = Connect-Swis -Hostname $OrionServer -Credential $Credential
+    $cred = Get-Credential -Message "Orion credentials"
+    $swis = Connect-Swis -Hostname $OrionServer -Credential $cred
 }
 if (-not $swis) { throw "Could not connect to SWIS on '$OrionServer'." }
 
@@ -87,8 +67,11 @@ $results = foreach ($node in $nodes) {
 
     if ([string]::IsNullOrWhiteSpace($newCaption) -or $newCaption -eq $oldCaption) { continue }
 
-    $status = 'Skipped (WhatIf)'
-    if ($PSCmdlet.ShouldProcess("NodeID $($node.NodeID)", "Rename '$oldCaption' -> '$newCaption'")) {
+    if ($DryRun) {
+        $status = 'DryRun'
+        Write-Host "[DRY]  $oldCaption -> $newCaption" -ForegroundColor Yellow
+    }
+    else {
         try {
             Set-SwisObject -SwisConnection $swis -Uri $node.Uri -Properties @{ Caption = $newCaption }
             $status = 'Updated'
@@ -114,6 +97,7 @@ if ($results) {
     $results | Export-Csv -Path $LogPath -NoTypeInformation -Encoding UTF8
     $results | Format-Table -AutoSize
     Write-Host "`nTotal: $(@($results).Count) nodes. Log saved to: $LogPath" -ForegroundColor Cyan
+    if ($DryRun) { Write-Host "Dry run - nothing was changed. Set `$DryRun = `$false to apply." -ForegroundColor Yellow }
 }
 else {
     Write-Host "No nodes found that need changes." -ForegroundColor Cyan
