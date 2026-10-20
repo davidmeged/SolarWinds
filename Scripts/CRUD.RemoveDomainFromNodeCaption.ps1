@@ -31,6 +31,9 @@ param(
     [string]$LogPath = ".\OrionCaptionChanges_$(Get-Date -Format yyyyMMdd_HHmmss).csv"
 )
 
+# $PSCmdlet only exists when this runs as a .ps1 file (not when pasted into the console or run with F8)
+if (-not $PSCmdlet) { throw "Run this as a .ps1 file, e.g. .\CRUD.RemoveDomainFromNodeCaption.ps1 -OrionServer <server> -WhatIf" }
+
 # --- Load module ---
 if (-not (Get-Module -ListAvailable -Name SwisPowerShell)) {
     Write-Host "Installing SwisPowerShell module..." -ForegroundColor Yellow
@@ -46,6 +49,7 @@ else {
     if (-not $Credential) { $Credential = Get-Credential -Message "Orion credentials" }
     $swis = Connect-Swis -Hostname $OrionServer -Credential $Credential
 }
+if (-not $swis) { throw "Could not connect to SWIS on '$OrionServer'." }
 
 # --- Get nodes whose Caption contains a dot or a backslash ---
 $query = @"
@@ -58,7 +62,8 @@ $nodes = Get-SwisData -SwisConnection $swis -Query $query
 $ipv4Regex = '^\d{1,3}(\.\d{1,3}){3}$'
 
 $results = foreach ($node in $nodes) {
-    $oldCaption = $node.Caption.Trim()
+    $oldCaption = "$($node.Caption)".Trim()
+    if (-not $oldCaption) { continue }
     $newCaption = $oldCaption
 
     # Skip captions that are IP addresses
