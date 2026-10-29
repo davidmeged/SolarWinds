@@ -27,12 +27,46 @@ LEFT JOIN (
     GROUP BY AlertActiveID, AlertObjectID
 ) reset ON reset.AlertActiveID = AH.AlertActiveID AND reset.AlertObjectID = AH.AlertObjectID
 
--- One row per node, even if it belongs to several matching containers
+-- One row per node, even if it belongs to several matching containers.
+-- SWQL has no recursive queries, so nested groups are unrolled up to 3 levels below the site group.
 JOIN (
     SELECT DISTINCT cm.MemberPrimaryID as NodeID
     FROM Orion.ContainerMembers cm
     WHERE cm.MemberEntityType = 'Orion.Nodes'
-        AND cm.Container.Name LIKE 'Site 1223%'
+        AND (
+            -- Level 0: nodes directly in the site group
+            cm.Container.Name LIKE 'Site 1223%'
+
+            -- Level 1: nodes in a subgroup of the site group
+            OR cm.ContainerID IN (
+                SELECT g1.MemberPrimaryID
+                FROM Orion.ContainerMembers g1
+                WHERE g1.MemberEntityType = 'Orion.Groups'
+                    AND g1.Container.Name LIKE 'Site 1223%'
+            )
+
+            -- Level 2
+            OR cm.ContainerID IN (
+                SELECT g2.MemberPrimaryID
+                FROM Orion.ContainerMembers g2
+                JOIN Orion.ContainerMembers g1 ON g1.MemberPrimaryID = g2.ContainerID
+                WHERE g2.MemberEntityType = 'Orion.Groups'
+                    AND g1.MemberEntityType = 'Orion.Groups'
+                    AND g1.Container.Name LIKE 'Site 1223%'
+            )
+
+            -- Level 3
+            OR cm.ContainerID IN (
+                SELECT g3.MemberPrimaryID
+                FROM Orion.ContainerMembers g3
+                JOIN Orion.ContainerMembers g2 ON g2.MemberPrimaryID = g3.ContainerID
+                JOIN Orion.ContainerMembers g1 ON g1.MemberPrimaryID = g2.ContainerID
+                WHERE g3.MemberEntityType = 'Orion.Groups'
+                    AND g2.MemberEntityType = 'Orion.Groups'
+                    AND g1.MemberEntityType = 'Orion.Groups'
+                    AND g1.Container.Name LIKE 'Site 1223%'
+            )
+        )
 ) site ON site.NodeID = AO.RelatedNodeId
 
 WHERE AH.EventType = 0
