@@ -150,7 +150,7 @@ S.append(table(
         ["3", c("Invoke-FmcApi"), "מבצע כל קריאה ל-API. מחדש את ה-token כשהוא פג (401) וממתין כשעוברים את מגבלת הקצב (429)."],
         ["4", c("Get-FmcDeviceRecords"), "מושך את רשימת המכשירים המנוהלים, עמוד אחרי עמוד."],
         ["5", f"{c('Stop-Sessions')} + {c('Connect-Swis')} + בניית {c('$components')}", "מבטל את ה-token של FMC, מתחבר ל-SolarWinds, ממיר כל כתובת ניהול ל-IPv4 ובונה את רשימת הרכיבים."],
-        ["6", c("Add-Component"), "יוצר Node חדש ב-SolarWinds ורושם עבורו את ארבעת ה-pollers הסטנדרטיים."],
+        ["6", c("Add-Component"), "יוצר Node חדש ב-SolarWinds ורושם עבורו את רשימת ה-pollers."],
         ["7", c("Add-DiscoveredInterfaces"), "מגלה את ממשקי ה-Node, מסנן לפי רשימת ההיתר, מוסיף את הנותרים ורושם בלוג רק את מה שנוסף בפועל."],
         ["8", c("Stop-Sessions"), "סוגר את החיבור ל-SWIS וכותב שורת סיכום."],
     ],
@@ -279,21 +279,41 @@ S.append(pre(cut("$components = foreach ($device in $results) {", "}", end_exact
 # 6 ------------------------------------------------------------------------
 S.append(h2(6, "הוספת Node ורישום pollers"))
 S.append(f"""
-<p>{c("Add-Component")} זהה כמעט לחלוטין לפונקציה בסקריפט ה-DNA. ההבדל היחיד הוא ה-{c("Caption")}: כאן
-ה-Node נכנס ל-SolarWinds עם שם המכשיר מ-FMC ולא רק עם כתובת ה-IP.</p>
+<p>{c("Add-Component")} בנויה כמו הפונקציה בסקריפט ה-DNA, עם שני הבדלים. הראשון הוא ה-{c("Caption")}: כאן
+ה-Node נכנס ל-SolarWinds עם שם המכשיר מ-FMC ולא רק עם כתובת ה-IP. השני הוא רשימת ה-pollers, שהורחבה מעבר
+לארבעת ה-pollers הבסיסיים כדי לכסות גם CPU, זיכרון, ניתוב ומנהרות VPN של ה-FTD.</p>
 """)
 S.append(pre(function("Add-Component")))
-S.append(table(
-    ["Poller", "מה הוא אוסף"],
-    [
-        [c("N.Status.ICMP.Native"), "זמינות (Up/Down) בפינג."],
-        [c("N.ResponseTime.ICMP.Native"), "זמן תגובה ואיבוד חבילות."],
-        [c("N.Details.SNMP.Generic"), "פרטי המכשיר ב-SNMP: שם, דגם, גרסה."],
-        [c("N.Uptime.SNMP.Generic"), "זמן פעולה מאז האתחול האחרון."],
-    ],
-))
+
+# The poller table is built from the list in the script, so a poller added
+# to or removed from the script changes the table on the next build. A
+# poller without a description here stops the build.
+POLLER_INFO = {
+    "N.Status.ICMP.Native":            "זמינות (Up/Down) בפינג.",
+    "N.ResponseTime.ICMP.Native":      "זמן תגובה ואיבוד חבילות.",
+    "N.Details.SNMP.Generic":          "פרטי המכשיר ב-SNMP: שם, דגם, גרסה.",
+    "N.Uptime.SNMP.Generic":           "זמן פעולה מאז האתחול האחרון.",
+    "N.Cpu.SNMP.CiscoGen3":            "ניצול CPU במכשירי סיסקו.",
+    "N.Memory.SNMP.CiscoAsr":          "ניצול זיכרון, בשיטת המדידה של סיסקו ASR.",
+    "N.LoadAverage.SNMP.Linux":        "עומס מערכת (load average) של מערכת ההפעלה Linux שעליה רץ ה-FTD.",
+    "N.Routing.SNMP.Ipv4RoutingTable": "טבלת הניתוב (IPv4).",
+    "N.Topology_Layer3.SNMP.ipNetToPhysical": "טבלת ה-ARP, לצורך מפת הטופולוגיה ברמה 3.",
+    "N.FW.RemoteAccessTunnel.Details.SNMP.Firepower": "מנהרות Remote Access VPN ב-Firepower.",
+}
+_poll_block = cut("foreach ($pollerType in @(", ")) {", after="function Add-Component {")
+POLLERS = re.findall(r'"(N\.[^"]+)"', _poll_block)
+_missing = [p for p in POLLERS if p not in POLLER_INFO]
+if _missing:
+    sys.exit(f"no description for poller(s): {', '.join(_missing)} - add them to POLLER_INFO")
+S.append(table(["Poller", "מה הוא אוסף"], [[c(p), POLLER_INFO[p]] for p in POLLERS]))
+S.append(box("warn", "poller שהמכשיר לא תומך בו לא אוסף נתונים", f"""
+<p>הסקריפט רושם את כל ה-pollers ברשימה לכל Node, בלי לבדוק אם המכשיר תומך בהם. poller שהמכשיר לא עונה
+לו פשוט לא יאסוף נתונים. הדרך לוודא שהרשימה מתאימה היא להוסיף FTD אחד ידנית עם List Resources ולהשוות את
+ה-pollers ש-SolarWinds בחר לו:</p>
+{pre("SELECT PollerType FROM Orion.Pollers WHERE NetObjectType = 'N' AND NetObjectID = <NodeID>")}
+"""))
 S.append(f"""
-<p>שני ה-pollers של SNMP אוספים נתונים רק אם ה-community שב-{c("-SNMPCommunity")} מוגדר על מכשירי ה-FTD
+<p>ה-pollers של SNMP אוספים נתונים רק אם ה-community שב-{c("-SNMPCommunity")} מוגדר על מכשירי ה-FTD
 (בממשק של FMC, תחת {c("Devices > Platform Settings > SNMP")}), ושרת ה-SolarWinds מופיע שם ברשימת ה-Hosts.</p>
 """)
 
@@ -376,7 +396,7 @@ S.append(table(
         [f"{c('Run started')} / {c('Run completed')}", "בתחילת ההרצה ובסופה. שורת הסיכום מונה Nodes שנוספו, שהיו קיימים, שדולגו ושנכשלו, וממשקים שנוספו."],
         [c("FMC returned N device[s]"), "אחרי משיכת המכשירים."],
         [f"{c('Node already exists')} / {c('Added node')}", "לכל רכיב: שם, IP ו-NodeID."],
-        [c("Added poller"), "לכל אחד מארבעת ה-pollers של Node חדש."],
+        [c("Added poller"), "לכל poller שנרשם ל-Node חדש."],
         [c("Added interface"), "לכל ממשק שנוסף בפועל: שם ו-InterfaceID."],
         [f"{c('WARN')} / {c('ERROR')}", "מכשיר בלי כתובת תקינה, 429, כשל בהתחברות ל-FMC או ל-SWIS, כשל ברכיב."],
     ],
