@@ -63,3 +63,20 @@ python gen_code_pdf.py DNS.SetSolarWindsRecordToActiveServer.ps1   # just one
 
 The code is read from the `.ps1` files at build time, so a listing cannot drift
 from the script it documents. Rebuild after editing a script.
+
+# FMC-Integration-Explained.pdf — how it is built
+
+`gen_fmc_explainer.py` produces `../Scripts/FMC-Integration-Explained.pdf`: a
+Hebrew (RTL) walkthrough of `Scripts/FMC.DiscoverNodes.ps1`, laid out like
+`DNA-Integration-Explained.pdf`.
+
+The prose lives in the generator; the code blocks do not. Each one is cut out
+of the script between two anchor lines at build time, and the build stops
+with an error naming the anchor if the script no longer contains it. It uses
+the DejaVu fonts that ship with most Linux systems, so the only thing to
+install is WeasyPrint:
+
+```
+pip install weasyprint
+python gen_fmc_explainer.py
+```
