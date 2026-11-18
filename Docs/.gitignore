@@ -2,4 +2,4 @@ __pycache__/
 *.pyc
 Docs/fonts/
 Docs/doc.html
-Docs/fmc_explainer.html
+/fmc_explainer.html
