@@ -580,9 +580,15 @@ function Add-Component {
     }
 
     foreach ($pollerType in @(
-        "N.Status.ICMP.Native",
-        "N.ResponseTime.ICMP.Native",
+        "N.Cpu.SNMP.CiscoGen3",
         "N.Details.SNMP.Generic",
+        "N.FW.RemoteAccessTunnel.Details.SNMP.Firepower",
+        "N.LoadAverage.SNMP.Linux",
+        "N.Memory.SNMP.CiscoAsr",
+        "N.ResponseTime.ICMP.Native",
+        "N.Routing.SNMP.Ipv4RoutingTable",
+        "N.Status.ICMP.Native",
+        "N.Topology_Layer3.SNMP.ipNetToPhysical",
         "N.Uptime.SNMP.Generic"
     )) {
         $poller["PollerType"] = $pollerType
